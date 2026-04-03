@@ -525,7 +525,8 @@ class SettingsDialog(QDialog):
         self.tab_dictionaries_layout = QVBoxLayout(self.tab_dictionaries)
 
         dict_help = QLabel(
-            "Import .zip (Yomitan) or .pkl dictionaries, enable/disable them, and set lookup priority order."
+            "Import .zip (Yomitan) or .pkl dictionaries, enable/disable them with the checkbox, and set lookup priority order.\n"
+            "Disabling keeps files intact. Use Delete to remove an imported dictionary file."
         )
         dict_help.setWordWrap(True)
         self.tab_dictionaries_layout.addWidget(dict_help)
@@ -541,7 +542,7 @@ class SettingsDialog(QDialog):
         up_btn.clicked.connect(self._move_dictionary_up)
         down_btn = QPushButton("Move Down")
         down_btn.clicked.connect(self._move_dictionary_down)
-        remove_btn = QPushButton("Remove")
+        remove_btn = QPushButton("Delete…")
         remove_btn.clicked.connect(self._remove_dictionary)
 
         dict_btn_row.addWidget(import_btn)
@@ -726,10 +727,29 @@ class SettingsDialog(QDialog):
         item = self.dictionary_list.item(row)
         source = dict(item.data(Qt.ItemDataRole.UserRole) or {})
         if source.get('builtin'):
-            QMessageBox.information(self, 'Cannot remove built-in dictionary', 'The built-in dictionary cannot be removed.')
+            QMessageBox.information(self, 'Cannot delete built-in dictionary', 'The built-in dictionary cannot be deleted.')
             return
-        self.dictionary_list.takeItem(row)
-        self._sync_dictionary_sources_from_list()
+
+        name = source.get('name', 'Dictionary')
+        confirm = QMessageBox.question(
+            self,
+            'Confirm dictionary deletion',
+            f"Delete '{name}' from Weikipop?\n\n"
+            "This removes the imported dictionary file from disk. "
+            "Use the checkbox to disable without deleting.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        success, err = self.lookup.delete_dictionary_source(source.get('id', ''))
+        if not success:
+            QMessageBox.warning(self, 'Dictionary deletion failed', err or 'Unknown error')
+            return
+
+        self._dictionary_sources = self.lookup.get_dictionary_sources()
+        self._refresh_dictionary_list()
 
     def save_and_accept(self):
         # Update OCR Provider

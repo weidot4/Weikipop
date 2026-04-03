@@ -2,9 +2,12 @@ import json
 import pickle
 import re
 import zipfile
+from html import escape
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Tuple
+
+from src.dictionary.structured_content import handle_structured_content
 
 DEFAULT_FREQ = 999_999
 ID_NAMESPACE = 10_000_000
@@ -44,18 +47,19 @@ def _extract_glosses(definitions: list) -> list[str]:
         if isinstance(definition, str):
             text = definition.strip()
             if text:
-                glosses.append(text)
+                glosses.append(escape(text))
         elif isinstance(definition, dict):
             def_type = definition.get('type')
             if def_type == 'text':
                 text = (definition.get('text') or '').strip()
                 if text:
-                    glosses.append(text)
+                    glosses.append(escape(text))
             elif def_type == 'structured-content':
-                text = _extract_text(definition.get('content')).strip()
-                text = re.sub(r'\s+', ' ', text)
-                if text:
-                    glosses.append(text)
+                rendered = handle_structured_content(definition)
+                for html_fragment in rendered:
+                    fragment = (html_fragment or '').strip()
+                    if fragment:
+                        glosses.append(fragment)
     return glosses
 
 

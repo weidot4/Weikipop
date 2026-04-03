@@ -135,6 +135,35 @@ class Lookup(threading.Thread):
         config.save()
         self._load_configured_dictionaries()
 
+    def delete_dictionary_source(self, source_id: str) -> Tuple[bool, str]:
+        """Delete a dictionary source entry and its file when appropriate.
+
+        This is intentionally separate from enable/disable toggles.
+        """
+        if not source_id:
+            return False, 'Missing dictionary id.'
+
+        sources = self.get_dictionary_sources()
+        target = next((s for s in sources if s.get('id') == source_id), None)
+        if not target:
+            return False, 'Dictionary not found.'
+        if target.get('builtin'):
+            return False, 'Built-in dictionary cannot be deleted.'
+
+        path = target.get('path', '')
+        if path:
+            try:
+                p = Path(path)
+                # Only remove imported dictionary files inside managed directory.
+                if p.exists() and self.user_dictionary_dir.resolve() in p.resolve().parents:
+                    p.unlink()
+            except Exception as exc:
+                return False, f'Failed to delete dictionary file: {exc}'
+
+        remaining = [s for s in sources if s.get('id') != source_id]
+        self.set_dictionary_sources(remaining)
+        return True, ''
+
     def import_dictionary_files(self, file_paths: List[str]) -> Dict[str, Any]:
         report = {'imported': [], 'failed': [], 'skipped': []}
         if not file_paths:
