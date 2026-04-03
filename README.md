@@ -13,9 +13,8 @@ It continuously or manually scans a screen region, performs OCR, and shows dicti
 - Global shortcuts and tray-based settings
 - Cross-platform support (Windows/Linux/macOS)
 
-## Project status
-
-This repository is actively maintained. The main focus is stability, predictable behavior, and practical Japanese reading workflow support.
+## Planned Features
+- Proper dictionary import system compared to base meikipop + multiple dict support
 
 ## Installation
 
@@ -83,6 +82,8 @@ This project is licensed under GPL-3.0. See [LICENSE](LICENSE).
 
 - [rtr46](https://github.com/rtr46) for the original Meikipop project
 - [zurcGH](https://github.com/zurcGH) for Meikipop-Anki lineage
+- [kqq](https://cdn.discordapp.com/attachments/1466228750185398446/1483992942980108439/ezgif-22972d5fd21a86b6.gif?ex=69d06220&is=69cf10a0&hm=3170f8de6f98b4358268a5b598c98390ec1009ab31028eb18166a22a6748b991&) for being my first initial tester!
+- [busting chan](https://cdn.discordapp.com/attachments/1487214676713406616/1487613970683793499/image.png?ex=69d05f79&is=69cf0df9&hm=b3f2cacf2a76e07bcd735c2eb7c8bed646285f7ecb432179e3a35d5796df7305&)
 
 
 
