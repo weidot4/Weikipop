@@ -1,16 +1,22 @@
 # lookup.py - Optimized version
 import logging
 import math
+import os
+import pickle
 import re
+import shutil
 import threading
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.config.config import config, MAX_DICT_ENTRIES
 from src.dictionary.customdict import Dictionary, WRITTEN_FORM_INDEX, READING_INDEX, FREQUENCY_INDEX, ENTRY_ID_INDEX, DEFAULT_FREQ
 from src.dictionary.deconjugator import Deconjugator, Form
 from src.dictionary.yomitan_client import YomitanClient
+from src.dictionary.yomitan_importer import convert_yomitan_zip_to_payload, write_payload_pickle
 
 KANJI_REGEX = re.compile(r'[\u4e00-\u9faf]')
 JAPANESE_SEPARATORS = {
@@ -33,6 +39,8 @@ class DictionaryEntry:
     deconjugation_process: tuple
     priority: float = 0.0
     match_len: int = 0  # Add match_len field for Yomitan entries
+    dictionary_name: str = ''
+    dictionary_id: str = ''
 
 
 @dataclass
@@ -50,13 +58,19 @@ class Lookup(threading.Thread):
         self.shared_state = shared_state
         self.popup_window = popup_window
         self.last_hit_result = None
+        self._dict_lock = threading.RLock()
+
+        self.user_dictionary_dir = Path('user_dictionaries')
+        self.user_dictionary_dir.mkdir(exist_ok=True)
+
+        # entry_id -> source metadata
+        self.entry_sources: Dict[int, Dict[str, Any]] = {}
+        self.primary_kanji_entries: Dict[str, Dict[str, Any]] = {}
 
         self.dictionary = Dictionary()
         self.lookup_cache: OrderedDict = OrderedDict()
         self.CACHE_SIZE = 500
-
-        if not self.dictionary.load_dictionary('dictionary.pkl'):
-            raise RuntimeError("Failed to load dictionary.")
+        self._load_configured_dictionaries()
         self.deconjugator = Deconjugator(self.dictionary.deconjugator_rules)
 
         # Lazy initialization of Yomitan client - only when needed
@@ -78,7 +92,196 @@ class Lookup(threading.Thread):
         return self._yomitan_client
 
     def clear_cache(self):
-        self.lookup_cache = OrderedDict()
+        with self._dict_lock:
+            self.lookup_cache = OrderedDict()
+
+    def _default_dictionary_sources(self) -> List[Dict[str, Any]]:
+        return [{
+            'id': 'builtin-main',
+            'name': 'Main Dictionary',
+            'path': 'dictionary.pkl',
+            'enabled': True,
+            'priority': 0,
+            'kind': 'pickle',
+            'builtin': True,
+        }]
+
+    def get_dictionary_sources(self) -> List[Dict[str, Any]]:
+        sources = getattr(config, 'dictionary_sources', []) or []
+        if not sources:
+            sources = self._default_dictionary_sources()
+        return sorted(sources, key=lambda x: int(x.get('priority', 0)))
+
+    def set_dictionary_sources(self, sources: List[Dict[str, Any]]):
+        normalized = []
+        for idx, source in enumerate(sources):
+            normalized.append({
+                'id': source.get('id') or str(uuid.uuid4()),
+                'name': (source.get('name') or 'Dictionary').strip(),
+                'path': source.get('path') or '',
+                'enabled': bool(source.get('enabled', True)),
+                'priority': idx,
+                'kind': source.get('kind') or 'pickle',
+                'builtin': bool(source.get('builtin', False)),
+            })
+
+        has_builtin = any(s.get('builtin') for s in normalized)
+        if not has_builtin:
+            normalized.insert(0, self._default_dictionary_sources()[0])
+            for idx, source in enumerate(normalized):
+                source['priority'] = idx
+
+        config.dictionary_sources = normalized
+        config.save()
+        self._load_configured_dictionaries()
+
+    def import_dictionary_files(self, file_paths: List[str]) -> Dict[str, Any]:
+        report = {'imported': [], 'failed': [], 'skipped': []}
+        if not file_paths:
+            return report
+
+        sources = self.get_dictionary_sources()
+        existing_names = {s.get('name', '').lower(): s for s in sources}
+
+        for file_path in file_paths:
+            try:
+                path = Path(file_path)
+                if not path.exists():
+                    report['failed'].append((file_path, 'File not found'))
+                    continue
+
+                suffix = path.suffix.lower()
+                if suffix not in {'.zip', '.pkl'}:
+                    report['failed'].append((file_path, 'Unsupported file type'))
+                    continue
+
+                if suffix == '.zip':
+                    payload, suggested_name = convert_yomitan_zip_to_payload(str(path), dict_index=0)
+                    safe_name = self._unique_dictionary_name(suggested_name, existing_names)
+                    out_path = self.user_dictionary_dir / f'{safe_name}.pkl'
+                    write_payload_pickle(payload, str(out_path))
+                    source_name = safe_name
+                else:
+                    with open(path, 'rb') as file:
+                        payload = pickle.load(file)
+                    if 'entries' not in payload or 'lookup_map' not in payload:
+                        report['failed'].append((file_path, 'Invalid dictionary pickle format'))
+                        continue
+                    source_name = self._unique_dictionary_name(path.stem, existing_names)
+                    out_path = self.user_dictionary_dir / f'{source_name}.pkl'
+                    shutil.copyfile(path, out_path)
+
+                source = {
+                    'id': str(uuid.uuid4()),
+                    'name': source_name,
+                    'path': str(out_path),
+                    'enabled': True,
+                    'priority': len(sources),
+                    'kind': 'pickle',
+                    'builtin': False,
+                }
+                sources.append(source)
+                existing_names[source_name.lower()] = source
+                report['imported'].append((file_path, source_name))
+            except Exception as exc:
+                report['failed'].append((file_path, str(exc)))
+
+        self.set_dictionary_sources(sources)
+        return report
+
+    @staticmethod
+    def _unique_dictionary_name(base_name: str, existing_names: Dict[str, Dict[str, Any]]) -> str:
+        sanitized = re.sub(r'[^\w\-\s\u3040-\u30ff\u3400-\u9fff]', '', (base_name or '').strip())
+        sanitized = sanitized or 'Dictionary'
+        candidate = sanitized
+        counter = 2
+        while candidate.lower() in existing_names:
+            candidate = f'{sanitized} ({counter})'
+            counter += 1
+        return candidate
+
+    def _load_configured_dictionaries(self):
+        with self._dict_lock:
+            sources = self.get_dictionary_sources()
+
+            combined_entries: Dict[int, list] = {}
+            combined_lookup_map: Dict[str, list] = {}
+            combined_kanji_entries: Dict[str, dict] = {}
+            combined_deconj_rules: list[dict] = []
+            self.entry_sources = {}
+
+            next_entry_id = 1
+            enabled_sources = [s for s in sources if s.get('enabled', True)]
+            if not enabled_sources:
+                enabled_sources = self._default_dictionary_sources()
+
+            for source_index, source in enumerate(sorted(enabled_sources, key=lambda x: int(x.get('priority', 0)))):
+                path = source.get('path', '')
+                if not path or not os.path.exists(path):
+                    logger.warning("Dictionary source '%s' missing path '%s'; skipping.", source.get('name'), path)
+                    continue
+
+                dictionary = Dictionary()
+                if not dictionary.load_dictionary(path):
+                    logger.warning("Failed to load dictionary source '%s' from '%s'.", source.get('name'), path)
+                    continue
+
+                id_map: Dict[int, int] = {}
+                for old_entry_id, senses in dictionary.entries.items():
+                    new_entry_id = next_entry_id
+                    next_entry_id += 1
+                    id_map[old_entry_id] = new_entry_id
+
+                    copied_senses = []
+                    for sense in senses:
+                        copied = dict(sense)
+                        copied.setdefault('source', source.get('name', 'Dictionary'))
+                        copied_senses.append(copied)
+                    combined_entries[new_entry_id] = copied_senses
+                    self.entry_sources[new_entry_id] = {
+                        'dictionary_name': source.get('name', 'Dictionary'),
+                        'dictionary_id': source.get('id', ''),
+                        'dictionary_priority': source_index,
+                    }
+
+                for surface, map_entries in dictionary.lookup_map.items():
+                    bucket = combined_lookup_map.setdefault(surface, [])
+                    for map_entry in map_entries:
+                        old_entry_id = map_entry[ENTRY_ID_INDEX]
+                        if old_entry_id not in id_map:
+                            continue
+                        new_entry_id = id_map[old_entry_id]
+                        bucket.append((
+                            map_entry[WRITTEN_FORM_INDEX],
+                            map_entry[READING_INDEX],
+                            map_entry[FREQUENCY_INDEX],
+                            new_entry_id,
+                        ))
+
+                if not combined_kanji_entries and dictionary.kanji_entries:
+                    combined_kanji_entries = dictionary.kanji_entries
+
+                if not combined_deconj_rules and dictionary.deconjugator_rules:
+                    combined_deconj_rules = dictionary.deconjugator_rules
+
+            self.dictionary.entries = combined_entries
+            self.dictionary.lookup_map = combined_lookup_map
+            self.dictionary.kanji_entries = combined_kanji_entries
+            self.primary_kanji_entries = combined_kanji_entries
+            self.dictionary.deconjugator_rules = combined_deconj_rules or []
+            self.dictionary._is_loaded = True
+
+            if not self.dictionary.deconjugator_rules:
+                # Last-resort deconjugator fallback for imported dictionaries lacking rules.
+                try:
+                    fallback = Dictionary()
+                    if fallback.load_dictionary('dictionary.pkl'):
+                        self.dictionary.deconjugator_rules = fallback.deconjugator_rules
+                except Exception:
+                    pass
+
+            self.deconjugator = Deconjugator(self.dictionary.deconjugator_rules)
+            self.clear_cache()
 
     def run(self):
         logger.debug("Lookup thread started.")
@@ -106,7 +309,7 @@ class Lookup(threading.Thread):
                     self.popup_window.set_latest_data(lookup_result, hit_result if isinstance(hit_result, dict) else None)
                 except TypeError:
                     self.popup_window.set_latest_data(lookup_result)
-            except:
+            except Exception:
                 logger.exception("An unexpected error occurred in the lookup loop. Continuing...")
         logger.debug("Lookup thread stopped.")
 
@@ -135,16 +338,18 @@ class Lookup(threading.Thread):
             return []
 
         # Fast path: cache check (most important optimization)
-        if text in self.lookup_cache:
-            self.lookup_cache.move_to_end(text)
-            return self.lookup_cache[text]
+        with self._dict_lock:
+            if text in self.lookup_cache:
+                self.lookup_cache.move_to_end(text)
+                return self.lookup_cache[text]
 
         # Choose lookup method based on availability (cache the availability check)
-        results = self._fast_lookup(text)
+        with self._dict_lock:
+            results = self._fast_lookup(text)
 
         # Append kanji entry (cheap operation)
         if config.show_kanji and KANJI_REGEX.match(text[0]):
-            kd = self.dictionary.kanji_entries.get(text[0])
+            kd = self.primary_kanji_entries.get(text[0])
             if kd:
                 results.append(KanjiEntry(
                     character=kd['character'],
@@ -155,16 +360,19 @@ class Lookup(threading.Thread):
                 ))
 
         # Cache results
-        self.lookup_cache[text] = results
-        if len(self.lookup_cache) > self.CACHE_SIZE:
-            self.lookup_cache.popitem(last=False)
+        with self._dict_lock:
+            self.lookup_cache[text] = results
+            if len(self.lookup_cache) > self.CACHE_SIZE:
+                self.lookup_cache.popitem(last=False)
         return results
 
     def _fast_lookup(self, text: str) -> List:
         """
-        Optimized lookup that prefers Yomitan but falls back to local.
-        Caches Yomitan availability to avoid repeated connection checks.
+        Optimized lookup that always uses local dictionaries and optionally
+        appends Yomitan API results.
         """
+        results = self._do_lookup(text)
+
         # Check if Yomitan is usable (cached result)
         if self._yomitan_enabled:
             if self._yomitan_available is None:
@@ -179,11 +387,19 @@ class Lookup(threading.Thread):
                     self._yomitan_enabled = False
             
             if self._yomitan_available:
-                # Use Yomitan (fast path with early exit on full match)
-                return self._lookup_yomitan_optimized(text)
-        
-        # Fallback to local dictionary
-        return self._do_lookup(text)
+                yomitan_entries = self._lookup_yomitan_optimized(text)
+                for entry in yomitan_entries:
+                    if hasattr(entry, 'dictionary_name'):
+                        entry.dictionary_name = entry.dictionary_name or 'Yomitan API'
+                    else:
+                        entry.dictionary_name = 'Yomitan API'
+                    if hasattr(entry, 'dictionary_id'):
+                        entry.dictionary_id = entry.dictionary_id or 'yomitan-api'
+                    else:
+                        entry.dictionary_id = 'yomitan-api'
+                results.extend(yomitan_entries)
+
+        return results[:MAX_DICT_ENTRIES]
 
     def _lookup_yomitan_optimized(self, lookup_string: str) -> List[Any]:
         """
@@ -304,18 +520,22 @@ class Lookup(threading.Thread):
         raw: List[Tuple[tuple, Form, int]],
         original_lookup: str,
     ) -> List[DictionaryEntry]:
-        merged: Dict[Tuple[str, str], dict] = {}
+        merged: Dict[Tuple[str, str, str], dict] = {}
 
         for map_entry, form, match_len in raw:
             written = map_entry[WRITTEN_FORM_INDEX]
             reading = map_entry[READING_INDEX] or ''
             freq = map_entry[FREQUENCY_INDEX]
             entry_id = map_entry[ENTRY_ID_INDEX]
+            source_meta = self.entry_sources.get(entry_id, {})
+            dictionary_name = source_meta.get('dictionary_name', 'Dictionary')
+            dictionary_id = source_meta.get('dictionary_id', '')
+            dictionary_priority = int(source_meta.get('dictionary_priority', 9999))
 
             entry_senses = self.dictionary.entries.get(entry_id, [])
             priority = self._calculate_priority(written, freq, form, match_len, original_lookup)
 
-            key = (written, reading)
+            key = (written, reading, dictionary_id or dictionary_name)
             if key not in merged:
                 merged[key] = {
                     'id': entry_id,
@@ -326,6 +546,9 @@ class Lookup(threading.Thread):
                     'deconjugation_process': form.process,
                     'priority': priority,
                     'match_len': match_len,
+                    'dictionary_name': dictionary_name,
+                    'dictionary_id': dictionary_id,
+                    'dictionary_priority': dictionary_priority,
                 }
             else:
                 cur = merged[key]
@@ -342,8 +565,7 @@ class Lookup(threading.Thread):
 
         sorted_entries = sorted(
             merged.values(),
-            key=lambda x: (x['match_len'], x['priority']),
-            reverse=True,
+            key=lambda x: (x['dictionary_priority'], -x['match_len'], -x['priority']),
         )
 
         results = []
@@ -357,6 +579,8 @@ class Lookup(threading.Thread):
                 deconjugation_process=d['deconjugation_process'],
                 priority=d['priority'],
                 match_len=d['match_len'],
+                dictionary_name=d['dictionary_name'],
+                dictionary_id=d['dictionary_id'],
             ))
         return results
 

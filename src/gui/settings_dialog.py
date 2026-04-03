@@ -4,7 +4,8 @@ from PyQt6.QtGui import QColor, QIcon, QFontDatabase, QKeySequence
 from PyQt6.QtWidgets import (QWidget, QDialog, QFormLayout, QComboBox, QScrollArea,
                              QSpinBox, QCheckBox, QPushButton, QColorDialog, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QDialogButtonBox, QLabel, QSlider, QDoubleSpinBox,
-                             QTabWidget, QSizePolicy, QFontComboBox, QLineEdit)
+                             QTabWidget, QSizePolicy, QFontComboBox, QLineEdit,
+                             QFileDialog, QMessageBox, QListWidget, QListWidgetItem)
 
 from src.dictionary.lookup import Lookup
 from src.config.config import config, APP_NAME, IS_WINDOWS
@@ -277,6 +278,7 @@ class SettingsDialog(QDialog):
 
         add_shortcut_row("Add to Anki:", "add_to_anki", "Alt+A")
         add_shortcut_row("Copy Sentence:", "copy_text", "Alt+C")
+        add_shortcut_row("Scroll Popup:", "scroll_popup", "Alt+Wheel")
 
         shortcuts_group.setLayout(shortcuts_layout)
         self.tab_shortcuts_layout.addWidget(shortcuts_group)
@@ -446,12 +448,12 @@ class SettingsDialog(QDialog):
         self.form_layouts.append(anki_layout)
 
         self.anki_enabled_check = QCheckBox()
-        self.anki_enabled_check.setChecked(getattr(config, "enabled", True))
+        self.anki_enabled_check.setChecked(getattr(config, "anki_enabled", True))
         anki_layout.addRow("Enable Anki:", self.anki_enabled_check)
 
         url_row = QHBoxLayout()
         url_row.setContentsMargins(0, 0, 0, 0)
-        self.anki_url_edit = QLineEdit(getattr(config, "url", "http://127.0.0.1:8765"))
+        self.anki_url_edit = QLineEdit(getattr(config, "anki_url", "http://127.0.0.1:8765"))
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setFixedWidth(70)
         refresh_btn.clicked.connect(self._anki_refresh)
@@ -507,12 +509,49 @@ class SettingsDialog(QDialog):
         self._update_field_map_rows(self.anki_model_combo.currentText())
         self.tab_anki_layout.addStretch()
 
+        # ==========================================
+        # TAB 6: Dictionaries
+        # ==========================================
+        self.tab_dictionaries = QWidget()
+        self.tab_dictionaries_layout = QVBoxLayout(self.tab_dictionaries)
+
+        dict_help = QLabel(
+            "Import .zip (Yomitan) or .pkl dictionaries, enable/disable them, and set lookup priority order."
+        )
+        dict_help.setWordWrap(True)
+        self.tab_dictionaries_layout.addWidget(dict_help)
+
+        self.dictionary_list = QListWidget()
+        self.dictionary_list.setSelectionMode(self.dictionary_list.SelectionMode.SingleSelection)
+        self.tab_dictionaries_layout.addWidget(self.dictionary_list)
+
+        dict_btn_row = QHBoxLayout()
+        import_btn = QPushButton("Import Dictionary Files…")
+        import_btn.clicked.connect(self._import_dictionaries)
+        up_btn = QPushButton("Move Up")
+        up_btn.clicked.connect(self._move_dictionary_up)
+        down_btn = QPushButton("Move Down")
+        down_btn.clicked.connect(self._move_dictionary_down)
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._remove_dictionary)
+
+        dict_btn_row.addWidget(import_btn)
+        dict_btn_row.addWidget(up_btn)
+        dict_btn_row.addWidget(down_btn)
+        dict_btn_row.addWidget(remove_btn)
+        self.tab_dictionaries_layout.addLayout(dict_btn_row)
+
+        self._dictionary_sources = self.lookup.get_dictionary_sources()
+        self._refresh_dictionary_list()
+        self.tab_dictionaries_layout.addStretch()
+
         # Add tabs to main layout — each wrapped in a scroll area
         self.tabs.addTab(make_scrollable(self.tab_general),    "General")
         self.tabs.addTab(make_scrollable(self.tab_shortcuts),  "Shortcuts")
         self.tabs.addTab(make_scrollable(self.tab_content),    "Popup Content")
         self.tabs.addTab(make_scrollable(self.tab_appearance), "Popup Appearance")
         self.tabs.addTab(make_scrollable(self.tab_anki),       "Anki")
+        self.tabs.addTab(make_scrollable(self.tab_dictionaries), "Dictionaries")
         main_layout.addWidget(self.tabs)
 
         # Buttons
@@ -608,6 +647,81 @@ class SettingsDialog(QDialog):
             self._update_color_buttons()
             self._mark_as_custom()
 
+    def _refresh_dictionary_list(self):
+        self.dictionary_list.clear()
+        for source in sorted(self._dictionary_sources, key=lambda s: int(s.get('priority', 0))):
+            label = source.get('name', 'Dictionary')
+            if source.get('builtin'):
+                label += ' (built-in)'
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, source)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if source.get('enabled', True) else Qt.CheckState.Unchecked)
+            self.dictionary_list.addItem(item)
+
+    def _sync_dictionary_sources_from_list(self):
+        synced = []
+        for idx in range(self.dictionary_list.count()):
+            item = self.dictionary_list.item(idx)
+            source = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+            source['enabled'] = item.checkState() == Qt.CheckState.Checked
+            source['priority'] = idx
+            synced.append(source)
+        self._dictionary_sources = synced
+
+    def _import_dictionaries(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            'Import dictionaries',
+            '',
+            'Dictionary files (*.zip *.pkl);;All files (*)',
+        )
+        if not paths:
+            return
+
+        report = self.lookup.import_dictionary_files(paths)
+        self._dictionary_sources = self.lookup.get_dictionary_sources()
+        self._refresh_dictionary_list()
+
+        imported_count = len(report.get('imported', []))
+        failed = report.get('failed', [])
+        if failed:
+            lines = [f"{src}: {err}" for src, err in failed[:5]]
+            msg = f"Imported {imported_count} dictionaries. Failed {len(failed)}.\n\n" + "\n".join(lines)
+            QMessageBox.warning(self, 'Dictionary import finished with issues', msg)
+        else:
+            QMessageBox.information(self, 'Dictionary import complete', f'Imported {imported_count} dictionaries.')
+
+    def _move_dictionary_up(self):
+        row = self.dictionary_list.currentRow()
+        if row <= 0:
+            return
+        item = self.dictionary_list.takeItem(row)
+        self.dictionary_list.insertItem(row - 1, item)
+        self.dictionary_list.setCurrentRow(row - 1)
+        self._sync_dictionary_sources_from_list()
+
+    def _move_dictionary_down(self):
+        row = self.dictionary_list.currentRow()
+        if row < 0 or row >= self.dictionary_list.count() - 1:
+            return
+        item = self.dictionary_list.takeItem(row)
+        self.dictionary_list.insertItem(row + 1, item)
+        self.dictionary_list.setCurrentRow(row + 1)
+        self._sync_dictionary_sources_from_list()
+
+    def _remove_dictionary(self):
+        row = self.dictionary_list.currentRow()
+        if row < 0:
+            return
+        item = self.dictionary_list.item(row)
+        source = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+        if source.get('builtin'):
+            QMessageBox.information(self, 'Cannot remove built-in dictionary', 'The built-in dictionary cannot be removed.')
+            return
+        self.dictionary_list.takeItem(row)
+        self._sync_dictionary_sources_from_list()
+
     def save_and_accept(self):
         # Update OCR Provider
         selected_provider = self.ocr_provider_combo.currentText()
@@ -649,8 +763,10 @@ class SettingsDialog(QDialog):
         config.show_keyboard_shortcuts = self.show_shortcuts_check.isChecked()
 
         # Anki settings — use schema attr names so config.save() persists them
-        config.enabled               = self.anki_enabled_check.isChecked()
-        config.url                   = self.anki_url_edit.text().strip() or "http://127.0.0.1:8765"
+        config.anki_enabled          = self.anki_enabled_check.isChecked()
+        config.anki_url              = self.anki_url_edit.text().strip() or "http://127.0.0.1:8765"
+        config.enabled               = config.anki_enabled
+        config.url                   = config.anki_url
         config.deck_name             = self.anki_deck_combo.currentText().strip() or "Default"
         config.model_name            = self.anki_model_combo.currentText().strip() or "Basic"
         config.prevent_duplicates    = self.anki_prevent_dup_check.isChecked()
@@ -662,6 +778,9 @@ class SettingsDialog(QDialog):
             for field, combo in self._field_map_combos.items()
             if combo.currentText()
         }
+
+        self._sync_dictionary_sources_from_list()
+        self.lookup.set_dictionary_sources(self._dictionary_sources)
 
         config.save()
 

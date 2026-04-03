@@ -8,8 +8,11 @@ It continuously or manually scans a screen region, performs OCR, and shows dicti
 
 - Fast screen-region OCR with multiple OCR backends
 - Dictionary lookup with deconjugation and kana/kanji handling
+- Multi-dictionary import support (`.zip` Yomitan and `.pkl`)
+- Dictionary enable/disable + priority ordering from settings
 - Optional Yomitan API integration
 - AnkiConnect export with configurable field mapping
+- Local mining log (`data/mining_log.jsonl`) for SRS workflows
 - Global shortcuts and tray-based settings
 - Cross-platform support (Windows/Linux/macOS)
 
@@ -57,6 +60,11 @@ If you use the **Google Lens (remote)** provider, set:
   - select OCR provider
   - choose scan mode/region
   - open settings
+- In Settings → Dictionaries:
+  - import dictionaries
+  - reorder dictionary priority
+  - enable/disable dictionaries
+- Use `Scroll Popup` shortcut (default `Alt+Wheel`) to scroll long lookup popups.
 
 ## Development workflow
 

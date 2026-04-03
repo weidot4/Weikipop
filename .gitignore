@@ -23,6 +23,8 @@ dist/
 # Local project-generated files
 config.ini
 dictionary.pkl
+user_dictionaries/
+data/mining_log.jsonl
 
 # IDE/editor settings
 .vscode/

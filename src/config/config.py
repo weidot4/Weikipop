@@ -29,6 +29,7 @@ class Config:
             'auto_scan_on_mouse_move': True,
             'magpie_compatibility': True,
             'show_keyboard_shortcuts': True,
+            'dictionary_sources': '[]',
         },
         'Theme': {
             'theme_name': 'Celestial Indigo',
@@ -74,6 +75,7 @@ class Config:
         'Shortcuts': {
             'add_to_anki': 'Alt+A',
             'copy_text': 'Alt+C',
+            'scroll_popup': 'Alt+Wheel',
         },
     }
 
@@ -102,11 +104,29 @@ class Config:
                     val = default
                 setattr(self, key, val)
 
+                # Preserve section-specific aliases for colliding keys.
+                if section == 'Anki':
+                    setattr(self, f'anki_{key}', val)
+                elif section == 'Yomitan':
+                    setattr(self, f'yomitan_{key}', val)
+
         # Parse structured settings
+        self.dictionary_sources = self._parse_json(getattr(self, 'dictionary_sources', '[]'), default=[])
         self.anki_field_map = self._parse_json(getattr(self, 'field_map', '{}'), default={})
         self.anki_duplicate_check_fields = self._parse_csv(getattr(self, 'duplicate_check_fields', ''), default=[])
         self.anki_sentence_delimiters = self._parse_csv(getattr(self, 'sentence_truncation_delimiters', ''), default=['。'])
         self.anki_sentence_delimiters_remove = self._parse_csv(getattr(self, 'sentence_truncation_delimiters_remove', ''), default=[])
+
+        # Canonical aliases to avoid section key collisions (enabled/api_url/url)
+        self.anki_enabled = getattr(self, 'anki_enabled', True)
+        self.anki_url = getattr(self, 'anki_url', 'http://127.0.0.1:8765')
+        self.yomitan_enabled = getattr(self, 'yomitan_enabled', False)
+        self.yomitan_api_url = getattr(self, 'yomitan_api_url', 'http://127.0.0.1:19633')
+
+        # Keep legacy attributes used in existing code paths
+        self.enabled = self.anki_enabled
+        self.url = self.anki_url
+        self.api_url = self.yomitan_api_url
 
         self.is_enabled = True
         logger.info("Configuration loaded.")
@@ -136,6 +156,8 @@ class Config:
             for key in settings:
                 val = getattr(self, key)
                 # Serialize structured values back into their string fields
+                if section == 'Settings' and key == 'dictionary_sources':
+                    val = json.dumps(getattr(self, 'dictionary_sources', []), ensure_ascii=False)
                 if section == 'Anki' and key == 'field_map':
                     val = json.dumps(getattr(self, 'anki_field_map', {}), ensure_ascii=False)
                 elif section == 'Anki' and key == 'duplicate_check_fields':
@@ -144,6 +166,14 @@ class Config:
                     val = ",".join(getattr(self, 'anki_sentence_delimiters', []))
                 elif section == 'Anki' and key == 'sentence_truncation_delimiters_remove':
                     val = ",".join(getattr(self, 'anki_sentence_delimiters_remove', []))
+                elif section == 'Anki' and key == 'enabled':
+                    val = getattr(self, 'anki_enabled', getattr(self, 'enabled', True))
+                elif section == 'Anki' and key == 'url':
+                    val = getattr(self, 'anki_url', getattr(self, 'url', 'http://127.0.0.1:8765'))
+                elif section == 'Yomitan' and key == 'enabled':
+                    val = getattr(self, 'yomitan_enabled', False)
+                elif section == 'Yomitan' and key == 'api_url':
+                    val = getattr(self, 'yomitan_api_url', 'http://127.0.0.1:19633')
                 parser.set(section, key, str(val).lower() if isinstance(val, bool) else str(val))
 
         with open('config.ini', 'w', encoding='utf-8') as f:

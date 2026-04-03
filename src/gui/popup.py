@@ -1,14 +1,17 @@
 # src/gui/popup.py
 import base64
+import json
 import logging
+import os
 import threading
 import time
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QTimer, QPoint, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QTimer, QPoint, QSize, Qt, pyqtSignal, QEvent
 from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QFontInfo
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QApplication
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QApplication, QScrollArea
 
 from src.config.config import config, IS_MACOS
 from src.dictionary.lookup import DictionaryEntry, KanjiEntry
@@ -49,6 +52,7 @@ class Popup(QWidget):
         self._last_mouse_pos       = None   # throttle move_to calls
         self._last_html            = None   # skip redundant setText calls
         self._last_size            = None   # skip redundant resize calls
+        self._dismissed_by_click   = False
 
         self.shared_state = shared_state
         self.input_loop   = input_loop
@@ -94,11 +98,18 @@ class Popup(QWidget):
         self.content_layout.setContentsMargins(10, 10, 10, 10)
         self.content_layout.setSpacing(4)
 
-        # Main dictionary content
+        # Main dictionary content (scrollable)
         self.display_label = QLabel()
         self.display_label.setWordWrap(True)
         self.display_label.setTextFormat(Qt.TextFormat.RichText)
-        self.content_layout.addWidget(self.display_label)
+        self.display_label.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.content_scroll.setWidget(self.display_label)
+        self.content_layout.addWidget(self.content_scroll)
 
         # Brief status message (e.g. "Mined!" / "Already in Anki") — hidden by default
         self.status_label = QLabel()
@@ -122,6 +133,10 @@ class Popup(QWidget):
         # Connect signals
         self.anki_presence_updated.connect(self._on_anki_presence_updated)
         self.status_message_signal.connect(self._show_status_message)
+
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
 
         self.hide()
 
@@ -307,9 +322,37 @@ class Popup(QWidget):
             if copy_pressed and not self.copy_shortcut_was_pressed:
                 self.copy_to_clipboard()
             self.copy_shortcut_was_pressed = copy_pressed
+
+            scroll_shortcut = getattr(config, 'scroll_popup', 'Alt+Wheel')
+            if self.is_visible and self._is_scroll_shortcut_active(scroll_shortcut):
+                delta = self.input_loop.get_and_reset_scroll_delta()
+                if delta:
+                    scrollbar = self.content_scroll.verticalScrollBar()
+                    scrollbar.setValue(scrollbar.value() - (delta * 42))
+            else:
+                # Do not carry stale wheel deltas between frames.
+                self.input_loop.get_and_reset_scroll_delta()
         else:
             self.anki_shortcut_was_pressed = False
             self.copy_shortcut_was_pressed = False
+            self.input_loop.get_and_reset_scroll_delta()
+
+    def _is_scroll_shortcut_active(self, shortcut: str) -> bool:
+        shortcut = (shortcut or '').strip()
+        if not shortcut:
+            return False
+
+        lower = shortcut.lower()
+        if lower.endswith('+wheel'):
+            key_part = shortcut[:-6].strip()
+            if not key_part:
+                return True
+
+            if key_part.lower() == config.hotkey.lower():
+                return getattr(self.input_loop, 'hotkey_is_pressed', False)
+            return self.input_loop.is_key_pressed(key_part)
+
+        return self.input_loop.is_key_pressed(shortcut)
 
     # ------------------------------------------------------------------ #
     #  Popup actions                                                        #
@@ -323,7 +366,10 @@ class Popup(QWidget):
         has_data = self._latest_data is not None
         should_show = has_data and (_kp or _as)
 
-        if should_show:
+        if not should_show:
+            self._dismissed_by_click = False
+
+        if should_show and not self._dismissed_by_click:
             self.show_popup()
             if self.is_visible:
                 mouse_pos = QCursor.pos()
@@ -334,6 +380,15 @@ class Popup(QWidget):
                     self.move_to(mp[0], mp[1])
         else:
             self.hide_popup()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress and self.is_visible:
+            global_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else QCursor.pos()
+            if not self.frameGeometry().contains(global_pos):
+                self._dismissed_by_click = True
+                self.set_latest_data(None, {})
+                self.hide_popup()
+        return super().eventFilter(obj, event)
 
     def copy_to_clipboard(self):
         _, ctx = self.get_latest_data()
@@ -497,12 +552,39 @@ class Popup(QWidget):
         try:
             note_id = anki.add_note(note)
             logger.info(f"Added note {note_id} to Anki")
+            self._append_mining_log(entry, ctx, note, note_id)
             self.status_message_signal.emit(f"Mined: {word or reading}")
             _mined_word = word or reading
             self.anki_presence_updated.emit(_mined_word, True)
         except Exception as e:
             logger.error(f"Failed to add note: {e}")
             self.status_message_signal.emit(f"Error: {e}")
+
+    def _append_mining_log(self, entry: DictionaryEntry, ctx: Dict[str, Any], note: Dict[str, Any], note_id: int):
+        try:
+            os.makedirs('data', exist_ok=True)
+            glosses = []
+            for sense in getattr(entry, 'senses', []) or []:
+                glosses.extend(sense.get('glosses', []))
+            payload = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'note_id': note_id,
+                'expression': getattr(entry, 'written_form', ''),
+                'reading': getattr(entry, 'reading', ''),
+                'dictionary': getattr(entry, 'dictionary_name', ''),
+                'glosses': glosses,
+                'context': (ctx.get('context_text') or '').strip(),
+                'document_title': ctx.get('document_title', ''),
+                'anki_note': {
+                    'deckName': note.get('deckName', ''),
+                    'modelName': note.get('modelName', ''),
+                    'fields': note.get('fields', {}),
+                },
+            }
+            with open('data/mining_log.jsonl', 'a', encoding='utf-8') as file:
+                file.write(json.dumps(payload, ensure_ascii=False) + '\n')
+        except Exception as exc:
+            logger.debug('Failed to append mining log: %s', exc)
 
     # ------------------------------------------------------------------ #
     #  Anki presence check (background thread)                             #
@@ -610,6 +692,12 @@ class Popup(QWidget):
                     f' <span style="color:{config.color_foreground};'
                     f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{entry.freq}</span>'
                 )
+            if getattr(entry, 'dictionary_name', ''):
+                header_html += (
+                    f' <span style="color:{config.color_foreground};'
+                    f'font-size:{config.font_size_definitions - 2}px;opacity:0.75;">'
+                    f'[{entry.dictionary_name}]</span>'
+                )
 
             # Definitions
             parts_calc, parts_html = [], []
@@ -663,7 +751,9 @@ class Popup(QWidget):
         h_pad = margins.left() + margins.right() + border * 2
         v_pad = margins.top() + margins.bottom() + border * 2 + MINE_BAR_HEIGHT + spacing
 
-        size = QSize(int(optimal_w) + h_pad, content_h + v_pad)
+        max_height = int((QApplication.primaryScreen().geometry().height() if QApplication.primaryScreen() else 1080) * 0.55)
+        target_height = min(content_h + v_pad, max_height)
+        size = QSize(int(optimal_w) + h_pad, target_height)
         return full_html, size
 
     def _render_kanji_entry(self, entry: KanjiEntry) -> str:
