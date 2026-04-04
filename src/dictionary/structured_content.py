@@ -53,7 +53,7 @@ def render_node(node: Any) -> str:
             return "" 
         elif tag == 'img':
             # Placeholder for images
-            return "[Image]" 
+            return "" 
         else:
             # Fallback for unknown tags: return content
             return inner_html
