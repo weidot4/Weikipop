@@ -7,7 +7,7 @@ import re
 import shutil
 import threading
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -592,37 +592,39 @@ class Lookup(threading.Thread):
                 if match_len > cur['match_len']:
                     cur['match_len'] = match_len
 
-        sorted_entries = sorted(
-            merged.values(),
-            key=lambda x: (x['dictionary_priority'], -x['match_len'], -x['priority']),
-        )
+        # Group entries by (written_form, reading), showing all enabled dicts.
+        # Users control which dictionaries appear via the enable/disable toggles
+        # in Settings → Dictionaries — no artificial per-word cap needed.
+        word_groups: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+        for entry in merged.values():
+            word_key = (entry['written_form'], entry['reading'])
+            word_groups[word_key].append(entry)
+
+        processed_groups = []
+        for entries in word_groups.values():
+            entries.sort(key=lambda x: x['dictionary_priority'])
+            best = entries[0]
+            processed_groups.append((-best['match_len'], -best['priority'], best['dictionary_priority'], entries))
+
+        processed_groups.sort(key=lambda x: (x[0], x[1], x[2]))
 
         results = []
-        max_dicts_per_word = max(1, int(getattr(config, 'max_dictionaries_per_word', 1)))
-        word_counts: Dict[Tuple[str, str], int] = {}
-
-        for d in sorted_entries:
-            word_key = (d['written_form'], d['reading'])
-            seen = word_counts.get(word_key, 0)
-            if seen >= max_dicts_per_word:
-                continue
-
-            word_counts[word_key] = seen + 1
-            results.append(DictionaryEntry(
-                id=d['id'],
-                written_form=d['written_form'],
-                reading=d['reading'],
-                senses=d['senses'],
-                freq=d['freq'],
-                deconjugation_process=d['deconjugation_process'],
-                priority=d['priority'],
-                match_len=d['match_len'],
-                dictionary_name=d['dictionary_name'],
-                dictionary_id=d['dictionary_id'],
-            ))
-
-            if len(results) >= MAX_DICT_ENTRIES:
-                break
+        for _ml, _pr, _dp, entries in processed_groups:
+            for d in entries:
+                results.append(DictionaryEntry(
+                    id=d['id'],
+                    written_form=d['written_form'],
+                    reading=d['reading'],
+                    senses=d['senses'],
+                    freq=d['freq'],
+                    deconjugation_process=d['deconjugation_process'],
+                    priority=d['priority'],
+                    match_len=d['match_len'],
+                    dictionary_name=d['dictionary_name'],
+                    dictionary_id=d['dictionary_id'],
+                ))
+                if len(results) >= MAX_DICT_ENTRIES:
+                    return results
         return results
 
     def _calculate_priority(

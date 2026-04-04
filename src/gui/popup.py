@@ -286,6 +286,7 @@ class Popup(QWidget):
                 if full_html != self._last_html:
                     self.display_label.setText(full_html)
                     self._last_html = full_html
+                    self.content_scroll.verticalScrollBar().setValue(0)
                 if new_size != self._last_size:
                     self.setFixedSize(new_size)
                     self._last_size = new_size
@@ -647,6 +648,52 @@ class Popup(QWidget):
     #  Content rendering                                                    #
     # ------------------------------------------------------------------ #
 
+    def _render_senses(self, entry, max_ratio: float, inline_only: bool = False) -> tuple:
+        """Render the definitions block for one DictionaryEntry. Returns (senses_html, updated_max_ratio).
+        inline_only=True skips the leading <br> so the caller controls line breaks."""
+        parts_calc, parts_html = [], []
+        for idx, sense in enumerate(entry.senses):
+            glosses   = sense.get("glosses", [])
+            pos_list  = sense.get("pos",     [])
+            tags_list = sense.get("tags",    [])
+
+            gloss_str = (", ".join(glosses) if config.show_all_glosses else (glosses[0] if glosses else ""))
+            s_calc = f"({idx+1})" if config.show_all_glosses else ""
+            s_html = f"<b>({idx+1})</b> " if config.show_all_glosses else ""
+
+            if config.show_pos and pos_list:
+                pos_str = f' ({", ".join(pos_list)})'
+                s_calc += pos_str
+                s_html += f'<span style="color:{config.color_foreground};opacity:0.7;"><i>{pos_str}</i></span> '
+            if config.show_tags and tags_list:
+                t_str = f' [{", ".join(tags_list)}]'
+                s_calc += t_str
+                s_html += (f'<span style="color:{config.color_foreground};'
+                           f'font-size:{config.font_size_definitions-2}px;opacity:0.7;">{t_str}</span> ')
+            s_calc += gloss_str
+            s_html += gloss_str
+            parts_calc.append(s_calc)
+            parts_html.append(s_html)
+
+        if config.compact_mode:
+            sep = "; "
+            full_def_html = sep.join(parts_html)
+            max_ratio = max(max_ratio, len(sep.join(parts_calc)) / self.def_chars_per_line)
+        else:
+            sep = "<br>"
+            full_def_html = sep.join(parts_html)
+            for p in parts_calc:
+                max_ratio = max(max_ratio, len(p) / self.def_chars_per_line)
+
+        if inline_only:
+            senses_html = (f'<span style="font-size:{config.font_size_definitions}px;">'
+                           f'{full_def_html}</span>')
+        else:
+            sep_space = " " if config.compact_mode else "<br>"
+            senses_html = (f'{sep_space}<span style="font-size:{config.font_size_definitions}px;">'
+                           f'{full_def_html}</span>')
+        return senses_html, max_ratio
+
     def _calculate_content_and_size(self, entries) -> tuple:
         if not self.is_calibrated or not entries:
             return None, None
@@ -654,90 +701,101 @@ class Popup(QWidget):
         all_html_parts = []
         max_ratio = 0.0
 
-        for i, entry in enumerate(entries):
-            if i > 0:
+        # Group consecutive DictionaryEntries that share the same (written_form, reading)
+        # so multiple dictionaries for one word are rendered as a single combined block.
+        groups = []
+        for entry in entries:
+            if isinstance(entry, KanjiEntry):
+                groups.append(entry)
+                continue
+            word_key = (entry.written_form, entry.reading)
+            if groups and isinstance(groups[-1], list) and groups[-1][0] == word_key:
+                groups[-1][1].append(entry)
+            else:
+                groups.append([word_key, [entry]])
+
+        for g_idx, group in enumerate(groups):
+            if g_idx > 0:
                 all_html_parts.append('<hr style="margin-top:0;margin-bottom:0;">')
 
-            if isinstance(entry, KanjiEntry):
-                defn = ', '.join(entry.meanings) if (config.show_examples or config.show_components) else '[字]'
-                calc = f"{entry.character} {', '.join(entry.readings)} {defn}"
+            # ── Kanji entry ──────────────────────────────────────────────
+            if isinstance(group, KanjiEntry):
+                defn = ', '.join(group.meanings) if (config.show_examples or config.show_components) else '[字]'
+                calc = f"{group.character} {', '.join(group.readings)} {defn}"
                 max_ratio = max(max_ratio, len(calc) / self.header_chars_per_line, 0.7)
-                all_html_parts.append(self._render_kanji_entry(entry))
+                all_html_parts.append(self._render_kanji_entry(group))
                 continue
 
-            # Header
-            header_calc = entry.written_form or ""
-            if entry.reading:
-                header_calc += f" [{entry.reading}]"
+            # ── Dictionary entry group ───────────────────────────────────
+            word_key, dict_entries = group
+            first_entry = dict_entries[0]
+
+            # Shared header (word + reading + deconjugation + frequency)
+            header_calc = first_entry.written_form or ""
+            if first_entry.reading:
+                header_calc += f" [{first_entry.reading}]"
             max_ratio = max(max_ratio, len(header_calc) / self.header_chars_per_line)
 
             header_html = (
                 f'<span style="color:{config.color_highlight_word};'
-                f'font-size:{config.font_size_header}px;">{entry.written_form}</span>'
+                f'font-size:{config.font_size_header}px;">{first_entry.written_form}</span>'
             )
-            if entry.reading:
+            if first_entry.reading:
                 header_html += (
                     f' <span style="color:{config.color_highlight_reading};'
-                    f'font-size:{config.font_size_header - 2}px;">[{entry.reading}]</span>'
+                    f'font-size:{config.font_size_header - 2}px;">[{first_entry.reading}]</span>'
                 )
-            if entry.deconjugation_process and config.show_deconjugation:
-                dc = " ← ".join(p for p in entry.deconjugation_process if p)
+            if first_entry.deconjugation_process and config.show_deconjugation:
+                dc = " ← ".join(p for p in first_entry.deconjugation_process if p)
                 if dc:
                     header_html += (
                         f' <span style="color:{config.color_foreground};'
                         f'font-size:{config.font_size_definitions - 2}px;opacity:0.8;">({dc})</span>'
                     )
-            if config.show_frequency and entry.freq < 999_999:
+            if config.show_frequency and first_entry.freq < 999_999:
                 header_html += (
                     f' <span style="color:{config.color_foreground};'
-                    f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{entry.freq}</span>'
-                )
-            if getattr(entry, 'dictionary_name', ''):
-                header_html += (
-                    f' <span style="color:{config.color_foreground};'
-                    f'font-size:{config.font_size_definitions - 2}px;opacity:0.75;">'
-                    f'[{entry.dictionary_name}]</span>'
+                    f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{first_entry.freq}</span>'
                 )
 
-            # Definitions
-            parts_calc, parts_html = [], []
-            for idx, sense in enumerate(entry.senses):
-                glosses   = sense.get("glosses", [])
-                pos_list  = sense.get("pos",     [])
-                tags_list = sense.get("tags",    [])
+            # Build combined definitions block
+            multi_dict = len(dict_entries) > 1
+            body_parts = []
+            for entry in dict_entries:
+                if multi_dict:
+                    # Render definitions without their own leading <br> —
+                    # we control exactly where each block starts.
+                    senses_html, max_ratio = self._render_senses(entry, max_ratio, inline_only=True)
+                    dict_name = getattr(entry, 'dictionary_name', '') or 'Dictionary'
+                    dict_label = (
+                        f'<span style="color:{config.color_foreground};'
+                        f'font-size:{config.font_size_definitions}px;opacity:0.85;">'
+                        f'<b>{dict_name}:</b> </span>'
+                    )
+                    body_parts.append(f'{dict_label}{senses_html}')
+                else:
+                    senses_html, max_ratio = self._render_senses(entry, max_ratio)
+                    # Single dict: label stays in the header (legacy behaviour)
+                    if getattr(entry, 'dictionary_name', ''):
+                        header_html += (
+                            f' <span style="color:{config.color_foreground};'
+                            f'font-size:{config.font_size_definitions - 2}px;opacity:0.75;">'
+                            f'[{entry.dictionary_name}]</span>'
+                        )
+                    body_parts.append(senses_html)
 
-                gloss_str = (", ".join(glosses) if config.show_all_glosses else (glosses[0] if glosses else ""))
-                s_calc = f"({idx+1})" if config.show_all_glosses else ""
-                s_html = f"<b>({idx+1})</b> " if config.show_all_glosses else ""
-
-                if config.show_pos and pos_list:
-                    pos_str = f' ({", ".join(pos_list)})'
-                    s_calc += pos_str
-                    s_html += f'<span style="color:{config.color_foreground};opacity:0.7;"><i>{pos_str}</i></span> '
-                if config.show_tags and tags_list:
-                    t_str = f' [{", ".join(tags_list)}]'
-                    s_calc += t_str
-                    s_html += (f'<span style="color:{config.color_foreground};'
-                               f'font-size:{config.font_size_definitions-2}px;opacity:0.7;">{t_str}</span> ')
-                s_calc += gloss_str
-                s_html += gloss_str
-                parts_calc.append(s_calc)
-                parts_html.append(s_html)
-
-            if config.compact_mode:
-                sep = "; "
-                full_def_html = sep.join(parts_html)
-                max_ratio = max(max_ratio, len(sep.join(parts_calc)) / self.def_chars_per_line)
+            if multi_dict:
+                # Use <p> tags — Qt's rich text renderer guarantees these are
+                # block-level, unlike <br> which gets absorbed into inline flow.
+                p_header = f'<p style="margin:0;padding:0;">{header_html}</p>'
+                p_dicts = ''.join(
+                    f'<p style="margin:0;padding:0;margin-top:3px;">{part}</p>'
+                    for part in body_parts
+                )
+                all_html_parts.append(p_header + p_dicts)
             else:
-                sep = "<br>"
-                full_def_html = sep.join(parts_html)
-                for p in parts_calc:
-                    max_ratio = max(max_ratio, len(p) / self.def_chars_per_line)
-
-            sep_space = " " if config.compact_mode else "<br>"
-            defs_html = (f'{sep_space}<span style="font-size:{config.font_size_definitions}px;">'
-                         f'{full_def_html}</span>')
-            all_html_parts.append(f"{header_html}{defs_html}")
+                combined_body = body_parts[0] if body_parts else ''
+                all_html_parts.append(f"{header_html}{combined_body}")
 
         # Compute size
         optimal_w = max(self.max_content_width * min(1.0, max_ratio), 200)
