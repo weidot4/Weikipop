@@ -8,7 +8,6 @@ from PIL import Image
 
 from src.config.config import config
 from src.gui.region_selector import RegionSelector
-from src.utils.screen_fingerprint import content_fingerprint
 
 logger = logging.getLogger(__name__) # Get the logger
 
@@ -24,7 +23,6 @@ class ScreenManager(threading.Thread):
         self.monitor = None
         self.last_ocr_put_time = 0.0
         self.last_screenshot = None
-        self.last_screenshot_fp = None
         self.last_mouse_pos = None
         self.input_loop = input_loop
         # Persistent mss instance — created once in run() on the ScreenManager thread
@@ -82,17 +80,20 @@ class ScreenManager(threading.Thread):
                 processing_duration = time.perf_counter() - start_time
                 logger.debug(f"Screenshot {screenshot.size} complete in {processing_duration:.2f}s")
 
-                # Compare a sampled fingerprint instead of the full raw buffer.
-                # Raw is ~33 MB on 4K; a Python `==` does byte-wise compare on
-                # every tick, which on its own can dominate idle CPU usage.
-                screenshot_fp = content_fingerprint(screenshot.raw)
-                if self.last_screenshot is not None and self.last_screenshot_fp == screenshot_fp:
+                # Full byte-wise compare of the raw screenshot buffer. A sampled
+                # fingerprint over only a small fraction of the buffer can miss
+                # real changes that fall outside the sampled regions (e.g. a
+                # dialogue box at the bottom of the screen), causing OCR to be
+                # skipped indefinitely ("Screen content didn't change") even
+                # though the visible text has changed. The full compare costs
+                # well under a millisecond and is negligible next to the
+                # screenshot/OCR work that follows.
+                if self.last_screenshot is not None and self.last_screenshot.raw == screenshot.raw:
                     logger.debug(f"Screen content didnt change... skipping ocr")
                     self._sleep_and_handle_loop_exit(0.1)
                     continue
 
                 self.last_screenshot = screenshot
-                self.last_screenshot_fp = screenshot_fp
                 self.last_mouse_pos = self.input_loop.get_mouse_pos()
                 img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
                 self.shared_state.ocr_queue.put(img)
@@ -136,7 +137,6 @@ class ScreenManager(threading.Thread):
 
     def force_screenshot_trigger(self):
         self.last_screenshot = None
-        self.last_screenshot_fp = None
         self.last_mouse_pos = None
 
     def _sleep_and_handle_loop_exit(self, interval):
