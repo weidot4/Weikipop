@@ -472,7 +472,13 @@ class Popup(QWidget):
             expr_field  = next(
                 (af for af, src in field_map.items()
                  if src in ("{expression}", "Word", "Expression")), None)
-            dup_fields  = [expr_field] if expr_field else ["Front", "Word", "Expression"]
+            configured_fields = getattr(config, "anki_duplicate_check_fields", None)
+            if configured_fields:
+                dup_fields = configured_fields
+            elif expr_field:
+                dup_fields = [expr_field]
+            else:
+                dup_fields = ["Front", "Word", "Expression"]
             safe_re     = _re.escape(word or reading)
             for field in dup_fields:
                 try:
@@ -762,9 +768,13 @@ class Popup(QWidget):
                      if src in ("{expression}", "Word", "Expression")),
                     None
                 )
-                search_fields = [expression_field] if expression_field else [
-                    "Front", "Word", "Expression", "Vocab", "Kanji"
-                ]
+                configured_fields = getattr(config, "anki_duplicate_check_fields", None)
+                if configured_fields:
+                    search_fields = configured_fields
+                elif expression_field:
+                    search_fields = [expression_field]
+                else:
+                    search_fields = ["Front", "Word", "Expression", "Vocab", "Kanji"]
 
                 # re:^...$  = exact field match, not substring
                 safe  = _re.escape(word)
