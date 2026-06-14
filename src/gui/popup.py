@@ -702,6 +702,10 @@ class Popup(QWidget):
             if any(x in s for x in ("10061", "Connection refused", "Max retries",
                                      "NewConnectionError", "Failed to establish")):
                 self.status_message_signal.emit("Error: Anki not running")
+            elif "duplicate" in s.lower():
+                self.status_message_signal.emit("Already in Anki")
+                _dup_word = word or reading
+                self.anki_presence_updated.emit(_dup_word, True)
             else:
                 self.status_message_signal.emit("Error: could not add note")
 
@@ -772,6 +776,29 @@ class Popup(QWidget):
                             break
                     except Exception:
                         pass
+
+                # Fallback: the field-name guesses above can miss notes whose
+                # first/dupe-checked field isn't one of the guessed names, or
+                # whose content (e.g. furigana HTML) doesn't match the exact
+                # regex. canAddNotes uses Anki's own duplicate-scope rules —
+                # the same check addNote performs — so it agrees with what
+                # actually happens when Mine is clicked.
+                if not found:
+                    model_name = getattr(config, "model_name", "Basic")
+                    field_names = anki.get_model_field_names(model_name)
+                    first_field = field_names[0] if field_names else (expression_field or "Front")
+                    probe_note = {
+                        "deckName":  getattr(config, "deck_name", "Default"),
+                        "modelName": model_name,
+                        "fields":    {first_field: word},
+                    }
+                    try:
+                        can_add = anki.can_add_notes([probe_note])
+                        if can_add and can_add[0] is False:
+                            found = True
+                    except Exception:
+                        pass
+
                 self.anki_presence_updated.emit(word, found)
             except Exception:
                 pass
