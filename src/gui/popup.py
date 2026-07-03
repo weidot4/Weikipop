@@ -1093,8 +1093,33 @@ class Popup(QWidget):
         else:
             self._lazy_pending_groups   = []
             self._lazy_next_group_index = len(all_groups)
+            self._expand_senses_to_fill(target_height, content_width)
 
         return "".join(self._lazy_rendered_parts)
+
+    def _expand_senses_to_fill(self, target_height: float, content_width: int):
+        while True:
+            h = self._measure_html_height("".join(self._lazy_rendered_parts), content_width)
+            if h > target_height:
+                return
+            expanded = False
+            for g_idx, state_list in enumerate(self._rendered_sense_state):
+                for s_idx, (entry_idx, shown, total) in enumerate(state_list):
+                    if shown < total:
+                        state_list[s_idx] = (entry_idx, min(shown + self._SENSES_PER_LOAD, total), total)
+                        limits = {e_idx: count for (e_idx, count, _) in state_list}
+                        html, _ = self._render_one_group(
+                            self._rendered_groups[g_idx],
+                            self._group_indices[g_idx],
+                            sense_limits=limits,
+                        )
+                        self._lazy_rendered_parts[g_idx] = html
+                        expanded = True
+                        break
+                if expanded:
+                    break
+            if not expanded:
+                return
 
     # ------------------------------------------------------------------ #
     #  Lazy entry loading                                                   #
