@@ -920,9 +920,11 @@ class Popup(QWidget):
             sense_state: [(entry_idx, rendered, total), ...] for entries with
                          unrendered senses remaining.
         """
+        hr = '<hr style="margin-top:0;margin-bottom:0;">' if group_index > 0 else ''
+
         # ── Kanji entry ──────────────────────────────────────────────
         if isinstance(group, KanjiEntry):
-            return self._render_kanji_entry(group), []
+            return hr + self._render_kanji_entry(group), []
 
         # ── Dictionary entry group ───────────────────────────────────
         word_key, dict_entries = group
@@ -998,7 +1000,7 @@ class Popup(QWidget):
             combined_body = body_parts[0] if body_parts else ''
             html = f"{header_html}{combined_body}"
 
-        return html, sense_state
+        return hr + html, sense_state
 
     def _render_groups_to_html(self, groups: list, start_index: int = 0) -> tuple:
         """Render a list of entry groups to an HTML string.
