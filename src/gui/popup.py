@@ -59,6 +59,10 @@ class Popup(QWidget):
         # can never leave blank space at the top of the popup.
         self._scroll_reset_frames  = 0
         self._topmost_frames       = 0
+        self._FLIP_MARGIN          = 40
+        self._vn_is_below          = None
+        self._flip_left            = False
+        self._flip_up              = False
 
         self._lazy_rendered_parts   = []
         self._rendered_groups       = []
@@ -1251,6 +1255,9 @@ class Popup(QWidget):
         self.is_visible = False
         self.input_loop.suppress_scroll = False
         self._last_presence_word = None  # re-check on next show, even same word
+        self._vn_is_below = None
+        self._flip_left = False
+        self._flip_up = False
         QTimer.singleShot(50, self._release_lock_safely)
         self._restore_focus_on_mac()
 
@@ -1275,12 +1282,9 @@ class Popup(QWidget):
         if mode == "visual_novel_mode":
             sh = screen_geo.height()
             cy = y - screen_geo.top()
-            if cy > 2 * sh / 3:
-                is_below = False
-            elif cy < sh / 3:
-                is_below = True
-            else:
-                is_below = cy < sh / 2
+            if self._vn_is_below is None or abs(cy - sh / 2) > self._FLIP_MARGIN:
+                self._vn_is_below = cy < sh / 2
+            is_below = self._vn_is_below
             final_y = (y + offset) if is_below else (y - popup_size.height() - offset)
             final_y = max(screen_geo.top(), min(final_y, screen_geo.bottom() - popup_size.height()))
 
@@ -1297,26 +1301,40 @@ class Popup(QWidget):
                 final_x = pc * (1 - t) + pl * t
 
         elif mode == "flip_horizontally":
-            pref_x  = x + offset
-            final_x = pref_x if pref_x + popup_size.width() <= screen_geo.right() else x - popup_size.width() - offset
+            final_x = self._flip_x_with_hysteresis(x, offset, popup_size, screen_geo)
             final_y = y + offset
             final_y = max(screen_geo.top(), min(final_y, screen_geo.bottom() - popup_size.height()))
 
         elif mode == "flip_vertically":
             final_x = x + offset
             final_x = max(screen_geo.left(), min(final_x, screen_geo.right() - popup_size.width()))
-            pref_y  = y + offset
-            final_y = pref_y if pref_y + popup_size.height() <= screen_geo.bottom() else y - popup_size.height() - offset
+            final_y = self._flip_y_with_hysteresis(y, offset, popup_size, screen_geo)
 
         else:  # flip_both
-            pref_x  = x + offset
-            final_x = pref_x if pref_x + popup_size.width() <= screen_geo.right() else x - popup_size.width() - offset
-            pref_y  = y + offset
-            final_y = pref_y if pref_y + popup_size.height() <= screen_geo.bottom() else y - popup_size.height() - offset
+            final_x = self._flip_x_with_hysteresis(x, offset, popup_size, screen_geo)
+            final_y = self._flip_y_with_hysteresis(y, offset, popup_size, screen_geo)
 
         final_x = max(screen_geo.left(), min(final_x, screen_geo.right()  - popup_size.width()))
         final_y = max(screen_geo.top(),  min(final_y, screen_geo.bottom() - popup_size.height()))
         self.move(int(final_x), int(final_y))
+
+    def _flip_x_with_hysteresis(self, x, offset, popup_size, screen_geo):
+        fits   = x + offset + popup_size.width() <= screen_geo.right()
+        refits = x + offset + popup_size.width() <= screen_geo.right() - self._FLIP_MARGIN
+        if not fits:
+            self._flip_left = True
+        elif refits or not self._flip_left:
+            self._flip_left = False
+        return (x - popup_size.width() - offset) if self._flip_left else (x + offset)
+
+    def _flip_y_with_hysteresis(self, y, offset, popup_size, screen_geo):
+        fits   = y + offset + popup_size.height() <= screen_geo.bottom()
+        refits = y + offset + popup_size.height() <= screen_geo.bottom() - self._FLIP_MARGIN
+        if not fits:
+            self._flip_up = True
+        elif refits or not self._flip_up:
+            self._flip_up = False
+        return (y - popup_size.height() - offset) if self._flip_up else (y + offset)
 
     def reapply_settings(self):
         logger.debug("Popup: reapplying settings")
