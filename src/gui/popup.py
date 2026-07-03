@@ -73,6 +73,7 @@ class Popup(QWidget):
         self._lazy_next_group_index = 0
         self._render_epoch          = 0
         self._suppress_scroll_signal = False
+        self._render_ready          = False
 
         self._SENSES_PER_ENTRY_INITIAL = 4
         self._SENSES_PER_LOAD         = 5
@@ -296,6 +297,7 @@ class Popup(QWidget):
         with self._data_lock:
             self._latest_data   = data
             self._latest_context = context
+            self._render_ready  = False
 
     def get_latest_data(self) -> Tuple[Any, Optional[Dict[str, Any]]]:
         with self._data_lock:
@@ -342,6 +344,9 @@ class Popup(QWidget):
 
         self._last_latest_data    = latest_data
         self._last_latest_context = latest_context
+        with self._data_lock:
+            if self._latest_data is latest_data:
+                self._render_ready = True
 
         # Hotkey state — used for both presence check and shortcuts
         _kp = getattr(self.input_loop, 'hotkey_is_pressed', False)
@@ -413,7 +418,9 @@ class Popup(QWidget):
         Kept cheap: only reads hotkey state and moves the window."""
         _kp = getattr(self.input_loop, 'hotkey_is_pressed', False)
         _as = config.auto_scan_mode and config.auto_scan_mode_lookups_without_hotkey
-        has_data = self._latest_data is not None
+        with self._data_lock:
+            has_data = self._latest_data is not None
+            render_ready = self._render_ready
         should_show = has_data and (_kp or _as)
 
         if not should_show:
@@ -421,7 +428,8 @@ class Popup(QWidget):
 
         if should_show and not self._dismissed_by_click:
             self._hide_ticks = 0
-            self.show_popup()
+            if render_ready:
+                self.show_popup()
             if self.is_visible:
                 self._topmost_frames += 1
                 if self._topmost_frames >= 60:
