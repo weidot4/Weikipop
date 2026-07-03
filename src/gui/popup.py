@@ -13,7 +13,7 @@ from PyQt6.QtCore import QTimer, QPoint, QSize, Qt, pyqtSignal, QEvent
 from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QFontInfo, QTextDocument
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QApplication, QScrollArea
 
-from src.config.config import config, IS_MACOS
+from src.config.config import config, IS_MACOS, IS_WINDOWS
 from src.dictionary.customdict import DEFAULT_FREQ
 from src.dictionary.lookup import DictionaryEntry, KanjiEntry
 from src.dictionary.anki_client import AnkiClient
@@ -58,6 +58,7 @@ class Popup(QWidget):
         # Set whenever content changes; counts down to 0 so Qt layout settling
         # can never leave blank space at the top of the popup.
         self._scroll_reset_frames  = 0
+        self._topmost_frames       = 0
 
         self._lazy_rendered_parts   = []
         self._rendered_groups       = []
@@ -99,6 +100,7 @@ class Popup(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.WindowDoesNotAcceptFocus |
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -407,6 +409,11 @@ class Popup(QWidget):
         if should_show and not self._dismissed_by_click:
             self.show_popup()
             if self.is_visible:
+                self._topmost_frames += 1
+                if self._topmost_frames >= 60:
+                    self._topmost_frames = 0
+                    self._assert_topmost()
+
                 # Keep forcing scroll to top for a few frames after content changes
                 # so Qt's layout engine can never leave blank space at the top.
                 if self._scroll_reset_frames > 0:
@@ -1218,10 +1225,24 @@ class Popup(QWidget):
             return
         self._store_active_window_on_mac()
         self.show()
-        if IS_MACOS:
-            self.raise_()
+        self.raise_()
+        self._assert_topmost()
         self.is_visible = True
         self.input_loop.suppress_scroll = True
+
+    def _assert_topmost(self):
+        if not IS_WINDOWS:
+            return
+        import ctypes
+        HWND_TOPMOST = -1
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+        try:
+            ctypes.windll.user32.SetWindowPos(
+                int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass
 
     def hide_popup(self):
         if not self.is_visible:
