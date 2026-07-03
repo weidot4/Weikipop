@@ -51,6 +51,8 @@ if IS_WINDOWS:
             def __init__(self):
                 self.last_check_time = 0
                 self.cache_duration = 0.5  # seconds
+                self.grace_duration = 1.0
+                self.last_success_time = 0.0
                 self.cached_info = None
                 self.class_name = "Window_Magpie_967EB565-6F73-4E94-AE53-00CC42592A22"
 
@@ -93,7 +95,12 @@ if IS_WINDOWS:
                 now = time.time()
                 if (now - self.last_check_time) > self.cache_duration:
                     self.last_check_time = now
-                    self.cached_info = self._fetch_magpie_info()
+                    info = self._fetch_magpie_info()
+                    if info is not None:
+                        self.cached_info = info
+                        self.last_success_time = now
+                    elif (now - self.last_success_time) > self.grace_duration:
+                        self.cached_info = None
                 return self.cached_info
 
             def transform_raw_to_visual(self, raw_mouse_pos: tuple[int, int], ratio) -> tuple[int, int]:
@@ -111,9 +118,14 @@ if IS_WINDOWS:
                 mx = int(mx * ratio)
                 my = int(my * ratio)
 
-                if src.width > 0 and src.height > 0 and (src.left <= mx < src.right and src.top <= my < src.bottom):
-                    relative_x = (mx - src.left) / src.width
-                    relative_y = (my - src.top) / src.height
+                margin = 32
+                near = (src.left - margin <= mx < src.right + margin and
+                        src.top - margin <= my < src.bottom + margin)
+                if src.width > 0 and src.height > 0 and near:
+                    cx = min(max(mx, src.left), src.right - 1)
+                    cy = min(max(my, src.top), src.bottom - 1)
+                    relative_x = (cx - src.left) / src.width
+                    relative_y = (cy - src.top) / src.height
                     screen_x = dest.left + (relative_x * dest.width)
                     screen_y = dest.top + (relative_y * dest.height)
                     return int(screen_x / ratio), int(screen_y / ratio)
