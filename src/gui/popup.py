@@ -59,6 +59,7 @@ class Popup(QWidget):
         # can never leave blank space at the top of the popup.
         self._scroll_reset_frames  = 0
         self._topmost_frames       = 0
+        self._hide_ticks           = 0
         self._FLIP_MARGIN          = 40
         self._vn_is_below          = None
         self._flip_left            = False
@@ -411,6 +412,7 @@ class Popup(QWidget):
             self._dismissed_by_click = False
 
         if should_show and not self._dismissed_by_click:
+            self._hide_ticks = 0
             self.show_popup()
             if self.is_visible:
                 self._topmost_frames += 1
@@ -431,6 +433,11 @@ class Popup(QWidget):
                     self._last_mouse_pos = mp
                     self.move_to(mp[0], mp[1])
         else:
+            if (_kp or _as) and not has_data and self.is_visible and not self._dismissed_by_click:
+                self._hide_ticks += 1
+                if self._hide_ticks < 6:
+                    return
+            self._hide_ticks = 0
             self._scroll_reset_frames = 0
             self.hide_popup()
 

@@ -73,6 +73,7 @@ class Lookup(threading.Thread):
         self.shared_state = shared_state
         self.popup_window = popup_window
         self.last_hit_result = None
+        self._last_ocr_epoch = None
         self._dict_lock = threading.RLock()
 
         self.user_dictionary_dir = Path('user_dictionaries')
@@ -406,14 +407,17 @@ class Lookup(threading.Thread):
 
                 current_lookup_string = self._extract_lookup_string(hit_result)
                 last_lookup_string = self._extract_lookup_string(self.last_hit_result)
-
+                current_epoch = hit_result.get("ocr_epoch") if isinstance(hit_result, dict) else None
 
                 self.last_hit_result = hit_result
 
-                # skip lookup if lookup string didnt change
-                if current_lookup_string == last_lookup_string:
+                if (current_lookup_string == last_lookup_string
+                        and current_epoch == self._last_ocr_epoch
+                        and (current_lookup_string is None
+                             or self.popup_window.get_latest_data()[0] is not None)):
                     continue
-                
+                self._last_ocr_epoch = current_epoch
+
 
                 lookup_result = self.lookup(current_lookup_string) if current_lookup_string else None
                 # Pass context to popup if supported
