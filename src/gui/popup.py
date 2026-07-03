@@ -1151,18 +1151,23 @@ class Popup(QWidget):
                         self._group_indices[g_idx],
                         sense_limits=limits,
                     )
+                    width = self._content_measure_width()
+                    old_h = self._measure_html_height("".join(self._lazy_rendered_parts), width)
+                    group_end = self._measure_html_height("".join(self._lazy_rendered_parts[:g_idx + 1]), width)
                     self._lazy_rendered_parts[g_idx] = new_html
-                    self._commit_html()
+                    new_h = self._measure_html_height("".join(self._lazy_rendered_parts), width)
+                    delta = (new_h - old_h) if group_end <= sb.value() else 0
+                    self._commit_html(delta)
                     return  # one expansion per scroll tick
 
         # Tier 2: load new entry groups
         if self._lazy_pending_groups:
             self._append_next_lazy_batch()
 
-    def _commit_html(self):
+    def _commit_html(self, scroll_delta: int = 0):
         """Rebuild full HTML from parts and apply with scroll preservation."""
         sb = self.content_scroll.verticalScrollBar()
-        saved_pos = sb.value()
+        saved_pos = sb.value() + scroll_delta
         full_html = "".join(self._lazy_rendered_parts)
         self._last_html = full_html
         self.display_label.setText(full_html)
