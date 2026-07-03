@@ -131,9 +131,10 @@ class ScreenManager(threading.Thread):
                 logger.error(f"Cannot set scan screen: index {screen_index} is out of bounds.")
 
     def get_scan_geometry(self):
-        if not self.monitor:
+        monitor = self.monitor
+        if not monitor:
             return 0, 0, 0, 0
-        return self.monitor["left"], self.monitor["top"], self.monitor["width"], self.monitor["height"]
+        return monitor["left"], monitor["top"], monitor["width"], monitor["height"]
 
     def force_screenshot_trigger(self):
         self.last_screenshot = None

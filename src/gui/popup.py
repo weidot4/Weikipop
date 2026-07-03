@@ -1386,6 +1386,16 @@ class Popup(QWidget):
         self.is_calibrated = False
         self._last_size = None
         self._cached_popup_size = None   # recompute size — dict count or compact mode may have changed
+        self._last_latest_data = None
+        self._last_latest_context = None
+        self._last_html = None
+        self._render_epoch += 1
+        self._lazy_rendered_parts = []
+        self._rendered_groups = []
+        self._group_indices = []
+        self._rendered_sense_state = []
+        self._lazy_pending_groups = []
+        self._lazy_next_group_index = 0
 
     # ------------------------------------------------------------------ #
     #  macOS focus management                                               #
