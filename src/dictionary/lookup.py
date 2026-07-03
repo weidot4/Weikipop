@@ -524,9 +524,20 @@ class Lookup(threading.Thread):
         return found_entries
 
     def _do_lookup(self, text: str) -> List[DictionaryEntry]:
+        """
+        Scan all prefixes of `text` (longest first), deconjugate each, then
+        look up every resulting form in the kanji / kana maps.
+
+        Collected results are keyed by entry_id and later merged/sorted by
+        (written_form, reading) in _format_and_sort. Every prefix length is
+        scanned (matching meikipop's behavior) because the correct entry for
+        the on-screen word is often only reachable via deconjugation at a
+        much shorter prefix than the longest literal match — an early-exit
+        cutoff based on the first match's length can prune that shorter,
+        correct match before it's ever tried, causing missed lookups.
+        """
         collected: Dict[int, Tuple[tuple, Form, int]] = {}
         found_primary_match = False
-        first_match_len = 0
         # Per-call cache for _get_map_entries — avoids repeated hira/kata
         # conversions when the same form text appears across multiple forms.
         _map_cache: Dict[str, List] = {}
@@ -540,15 +551,6 @@ class Lookup(threading.Thread):
             return result
 
         for prefix_len in range(len(text), 0, -1):
-            # Skip this prefix if we already have a longer match and this prefix
-            # is too short to be meaningful — but only when the first match itself
-            # was longer than 1 char, so single-char words (particles, etc.) still
-            # appear when they are the only result.
-            if (found_primary_match
-                    and first_match_len > 1
-                    and prefix_len < max(first_match_len - 2, 2)):
-                break
-
             prefix = text[:prefix_len]
 
             forms = self.deconjugator.deconjugate(prefix)
@@ -585,7 +587,6 @@ class Lookup(threading.Thread):
             if prefix_hits:
                 if not found_primary_match:
                     found_primary_match = True
-                    first_match_len = prefix_len
 
                 for map_entry, form in prefix_hits:
                     entry_id = map_entry[ENTRY_ID_INDEX]

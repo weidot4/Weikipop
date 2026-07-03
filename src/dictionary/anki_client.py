@@ -85,3 +85,11 @@ class AnkiClient:
         except:
             return []
 
+    def can_add_notes(self, notes: List[Dict[str, Any]]) -> List[bool]:
+        """For each note, returns whether AnkiConnect would allow addNote to
+        succeed (uses Anki's own duplicate-scope/model rules). A False entry
+        most commonly means the note would be rejected as a duplicate."""
+        try:
+            return self._invoke("canAddNotes", notes=notes)
+        except:
+            return [True] * len(notes)
