@@ -71,6 +71,8 @@ class Popup(QWidget):
         self._rendered_sense_state  = []
         self._lazy_pending_groups   = []    # groups not yet rendered
         self._lazy_next_group_index = 0
+        self._render_epoch          = 0
+        self._suppress_scroll_signal = False
 
         self._SENSES_PER_ENTRY_INITIAL = 4
         self._SENSES_PER_LOAD         = 5
@@ -317,10 +319,16 @@ class Popup(QWidget):
             full_html = self._calculate_content(latest_data)
             if full_html is not None:
                 if full_html != self._last_html:
-                    self.display_label.setText(full_html)
+                    self._render_epoch += 1
+                    self._suppress_scroll_signal = True
+                    try:
+                        self.display_label.setText(full_html)
+                        self.content_scroll.verticalScrollBar().setValue(0)
+                    finally:
+                        self._suppress_scroll_signal = False
                     self._last_html = full_html
-                    self.content_scroll.verticalScrollBar().setValue(0)
                     self._scroll_reset_frames = 8
+                    self.input_loop.get_and_reset_scroll_delta()
 
                 # Fixed consistent size — same width and height regardless of
                 # how many definitions exist, so the popup never jumps around.
@@ -423,7 +431,11 @@ class Popup(QWidget):
                 # Keep forcing scroll to top for a few frames after content changes
                 # so Qt's layout engine can never leave blank space at the top.
                 if self._scroll_reset_frames > 0:
-                    self.content_scroll.verticalScrollBar().setValue(0)
+                    self._suppress_scroll_signal = True
+                    try:
+                        self.content_scroll.verticalScrollBar().setValue(0)
+                    finally:
+                        self._suppress_scroll_signal = False
                     self._scroll_reset_frames -= 1
 
                 mouse_pos = QCursor.pos()
@@ -1115,6 +1127,8 @@ class Popup(QWidget):
     # ------------------------------------------------------------------ #
 
     def _on_scroll_lazy_load(self, value: int):
+        if self._suppress_scroll_signal:
+            return
         has_pending_senses = any(
             any(s[1] < s[2] for s in states)
             for states in self._rendered_sense_state
@@ -1154,8 +1168,23 @@ class Popup(QWidget):
         saved_pos = sb.value() + scroll_delta
         full_html = "".join(self._lazy_rendered_parts)
         self._last_html = full_html
-        self.display_label.setText(full_html)
-        QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
+        self._suppress_scroll_signal = True
+        try:
+            self.display_label.setText(full_html)
+        finally:
+            self._suppress_scroll_signal = False
+        epoch = self._render_epoch
+
+        def _restore(pos=saved_pos, ep=epoch):
+            if ep != self._render_epoch:
+                return
+            self._suppress_scroll_signal = True
+            try:
+                sb.setValue(pos)
+            finally:
+                self._suppress_scroll_signal = False
+
+        QTimer.singleShot(0, _restore)
 
     def _append_next_lazy_batch(self):
         if not self._lazy_pending_groups:
