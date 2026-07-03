@@ -58,19 +58,16 @@ class Popup(QWidget):
         # can never leave blank space at the top of the popup.
         self._scroll_reset_frames  = 0
 
-        # Lazy rendering — two-tier: entry groups + per-entry senses.
-        # Four parallel lists indexed by rendered-group position:
-        self._lazy_rendered_parts   = []    # HTML chunks per rendered group
-        self._rendered_groups       = []    # raw group data (for re-render on expansion)
-        self._group_indices         = []    # absolute group index (for <hr> decisions)
-        self._rendered_sense_state  = []    # per-group: [(entry_idx, shown, total), ...]
+        self._lazy_rendered_parts   = []
+        self._rendered_groups       = []
+        self._group_indices         = []
+        self._rendered_sense_state  = []
         self._lazy_pending_groups   = []    # groups not yet rendered
-        self._lazy_next_group_index = 0     # absolute group index for next batch
+        self._lazy_next_group_index = 0
 
-        # Per-entry sense limits
-        self._SENSES_PER_ENTRY_INITIAL = 4  # senses rendered on first show
-        self._SENSES_PER_LOAD         = 5  # senses added per scroll expansion
-        self._GROUPS_PER_LOAD         = 3  # groups added per scroll expansion
+        self._SENSES_PER_ENTRY_INITIAL = 4
+        self._SENSES_PER_LOAD         = 5
+        self._GROUPS_PER_LOAD         = 3
 
         self._dismissed_by_click   = False
 
@@ -840,17 +837,8 @@ class Popup(QWidget):
 
     def _render_senses(self, entry, max_ratio: float, inline_only: bool = False,
                        max_senses: int = None) -> tuple:
-        """Render the definitions block for one DictionaryEntry.
-
-        Args:
-            max_senses: If set, only render the first N senses.
-
-        Returns (senses_html, updated_max_ratio, rendered, total) where
-        rendered and total are sense counts (for lazy-expansion tracking).
-        """
         sense_count = len(entry.senses)
         effective_limit = max_senses if max_senses is not None else sense_count
-        # Compact mode: always render all senses (already one line)
         if config.compact_mode:
             effective_limit = sense_count
 
@@ -900,33 +888,17 @@ class Popup(QWidget):
         return senses_html, max_ratio, min(effective_limit, sense_count), sense_count
 
     def _initial_sense_limits(self, group) -> dict:
-        """Build {entry_idx: _SENSES_PER_ENTRY_INITIAL} for dictionary entries
-        in a group. KanjiEntry groups return an empty dict (no limiting)."""
         if isinstance(group, KanjiEntry):
             return {}
         _, dict_entries = group
         return {i: self._SENSES_PER_ENTRY_INITIAL for i in range(len(dict_entries))}
 
     def _render_one_group(self, group, group_index: int, sense_limits: dict = None):
-        """Render a single entry group to HTML with optional per-entry sense limits.
-
-        Args:
-            group: KanjiEntry or [word_key, [DictionaryEntry, ...]]
-            group_index: absolute position in the full group list (for <hr> decision)
-            sense_limits: {entry_idx: max_senses} — when set, each dictionary entry
-                          only renders up to this many senses. None = render all.
-
-        Returns (html: str, sense_state: list[tuple])
-            sense_state: [(entry_idx, rendered, total), ...] for entries with
-                         unrendered senses remaining.
-        """
         hr = '<hr style="margin-top:0;margin-bottom:0;">' if group_index > 0 else ''
 
-        # ── Kanji entry ──────────────────────────────────────────────
         if isinstance(group, KanjiEntry):
             return hr + self._render_kanji_entry(group), []
 
-        # ── Dictionary entry group ───────────────────────────────────
         word_key, dict_entries = group
         first_entry = dict_entries[0]
 
@@ -1043,9 +1015,6 @@ class Popup(QWidget):
         return self._cached_popup_size
 
     def _calculate_content(self, entries) -> 'str | None':
-        """Build initial HTML for display. Renders groups incrementally until
-        content fills ~1.2x the popup height, then stops. Each entry within a
-        group only renders its first _SENSES_PER_ENTRY_INITIAL senses."""
         if not self.is_calibrated or not entries:
             self._lazy_pending_groups   = []
             self._lazy_rendered_parts   = []
@@ -1086,7 +1055,7 @@ class Popup(QWidget):
             self._group_indices.append(i)
             self._rendered_sense_state.append(sense_state)
 
-            if h > target_height and i >= 1:  # always show at least 1 group
+            if h > target_height and i >= 1:
                 self._lazy_pending_groups   = all_groups[i + 1:]
                 self._lazy_next_group_index = i + 1
                 break
@@ -1126,8 +1095,6 @@ class Popup(QWidget):
     # ------------------------------------------------------------------ #
 
     def _on_scroll_lazy_load(self, value: int):
-        """Two-tier lazy expansion: senses within rendered groups first,
-        then new entry groups. Triggered at 70% scroll depth."""
         has_pending_senses = any(
             any(s[1] < s[2] for s in states)
             for states in self._rendered_sense_state
@@ -1139,7 +1106,6 @@ class Popup(QWidget):
         if sb.maximum() <= 0 or value < sb.maximum() * 0.70:
             return
 
-        # Tier 1: expand senses within already-rendered groups
         for g_idx, state_list in enumerate(self._rendered_sense_state):
             for s_idx, (entry_idx, shown, total) in enumerate(state_list):
                 if shown < total:
@@ -1158,14 +1124,12 @@ class Popup(QWidget):
                     new_h = self._measure_html_height("".join(self._lazy_rendered_parts), width)
                     delta = (new_h - old_h) if group_end <= sb.value() else 0
                     self._commit_html(delta)
-                    return  # one expansion per scroll tick
+                    return
 
-        # Tier 2: load new entry groups
         if self._lazy_pending_groups:
             self._append_next_lazy_batch()
 
     def _commit_html(self, scroll_delta: int = 0):
-        """Rebuild full HTML from parts and apply with scroll preservation."""
         sb = self.content_scroll.verticalScrollBar()
         saved_pos = sb.value() + scroll_delta
         full_html = "".join(self._lazy_rendered_parts)
@@ -1174,8 +1138,6 @@ class Popup(QWidget):
         QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
 
     def _append_next_lazy_batch(self):
-        """Render the next _GROUPS_PER_LOAD pending groups with initial sense
-        limits, append to all four parallel tracking lists."""
         if not self._lazy_pending_groups:
             return
 
