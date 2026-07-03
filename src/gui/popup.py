@@ -419,7 +419,7 @@ class Popup(QWidget):
         _kp = getattr(self.input_loop, 'hotkey_is_pressed', False)
         _as = config.auto_scan_mode and config.auto_scan_mode_lookups_without_hotkey
         with self._data_lock:
-            has_data = self._latest_data is not None
+            has_data = bool(self._latest_data)
             render_ready = self._render_ready
         should_show = has_data and (_kp or _as)
 

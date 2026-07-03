@@ -252,7 +252,7 @@ class Lookup(threading.Thread):
     @staticmethod
     def _harvest_freq(freq_index: Dict[Tuple[Optional[str], str], int], map_entry: tuple):
         freq = map_entry[FREQUENCY_INDEX]
-        if freq >= DEFAULT_FREQ:
+        if not isinstance(freq, int) or freq >= DEFAULT_FREQ:
             return
         key = (map_entry[WRITTEN_FORM_INDEX], map_entry[READING_INDEX] or '')
         cur = freq_index.get(key)
@@ -355,12 +355,14 @@ class Lookup(threading.Thread):
                 if progress_cb:
                     progress_cb(source_index + 1, n_sources, "")
 
+            harvested_paths = {s.get('path', '') for s in enabled_sources}
             for source in sources:
                 if source.get('enabled', True) or not source.get('builtin'):
                     continue
                 path = source.get('path', '')
-                if not path or not os.path.exists(path):
+                if not path or path in harvested_paths or not os.path.exists(path):
                     continue
+                harvested_paths.add(path)
                 try:
                     mtime = os.path.getmtime(path)
                 except OSError:
@@ -372,10 +374,10 @@ class Lookup(threading.Thread):
                     dictionary = Dictionary()
                     if not dictionary.load_dictionary(path):
                         continue
-                    self._dict_file_cache[path] = (mtime, dictionary)
-                for surface, map_entries in _throttled(dictionary.lookup_map.items()):
+                for map_entries in dictionary.lookup_map.values():
                     for map_entry in map_entries:
                         self._harvest_freq(freq_index, map_entry)
+                dictionary = None
 
             self.freq_index = freq_index
             self.dictionary.entries = combined_entries
@@ -412,12 +414,9 @@ class Lookup(threading.Thread):
                 self.last_hit_result = hit_result
 
                 if (current_lookup_string == last_lookup_string
-                        and current_epoch == self._last_ocr_epoch
-                        and (current_lookup_string is None
-                             or self.popup_window.get_latest_data()[0] is not None)):
+                        and current_epoch == self._last_ocr_epoch):
                     continue
                 self._last_ocr_epoch = current_epoch
-
 
                 lookup_result = self.lookup(current_lookup_string) if current_lookup_string else None
                 # Pass context to popup if supported
@@ -662,6 +661,8 @@ class Lookup(threading.Thread):
             written = map_entry[WRITTEN_FORM_INDEX]
             reading = map_entry[READING_INDEX] or ''
             freq = map_entry[FREQUENCY_INDEX]
+            if not isinstance(freq, int):
+                freq = DEFAULT_FREQ
             idx_freq = self.freq_index.get((written, reading))
             if idx_freq is None and reading:
                 idx_freq = self.freq_index.get((written, ''))
