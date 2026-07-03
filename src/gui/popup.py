@@ -14,6 +14,7 @@ from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QFontInfo, QTextDo
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QApplication, QScrollArea
 
 from src.config.config import config, IS_MACOS
+from src.dictionary.customdict import DEFAULT_FREQ
 from src.dictionary.lookup import DictionaryEntry, KanjiEntry
 from src.dictionary.anki_client import AnkiClient
 from src.gui.magpie_manager import magpie_manager
@@ -530,8 +531,8 @@ class Popup(QWidget):
             if (word and reading) else (word or reading)
         )
 
-        freq_val = getattr(entry, "freq", 999999)
-        freq_str = "" if freq_val >= 999999 else str(freq_val)
+        freq_val = getattr(entry, "freq", DEFAULT_FREQ)
+        freq_str = "" if freq_val >= DEFAULT_FREQ else str(freq_val)
 
         tags_str = " ".join(sorted(getattr(entry, "tags", set()) or []))
         conj_str = " > ".join(getattr(entry, "deconjugation_process", ()) or ())
@@ -923,10 +924,11 @@ class Popup(QWidget):
                     f' <span style="color:{config.color_foreground};'
                     f'font-size:{config.font_size_definitions - 2}px;opacity:0.8;">({dc})</span>'
                 )
-        if config.show_frequency and first_entry.freq < 999_999:
+        freq = getattr(first_entry, 'freq', DEFAULT_FREQ)
+        if config.show_frequency and freq < DEFAULT_FREQ:
             header_html += (
                 f' <span style="color:{config.color_foreground};'
-                f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{first_entry.freq}</span>'
+                f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{freq}</span>'
             )
 
         multi_dict = len(dict_entries) > 1
