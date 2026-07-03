@@ -897,7 +897,7 @@ class Popup(QWidget):
             sep_space = " " if config.compact_mode else "<br>"
             senses_html = (f'{sep_space}<span style="font-size:{config.font_size_definitions}px;">'
                            f'{full_def_html}</span>')
-        return senses_html, max_ratio, effective_limit, sense_count
+        return senses_html, max_ratio, min(effective_limit, sense_count), sense_count
 
     def _initial_sense_limits(self, group) -> dict:
         """Build {entry_idx: _SENSES_PER_ENTRY_INITIAL} for dictionary entries
@@ -1047,6 +1047,7 @@ class Popup(QWidget):
             self._rendered_groups       = []
             self._group_indices         = []
             self._rendered_sense_state  = []
+            self._lazy_next_group_index = 0
             return None
 
         # Build display groups: entries sharing (written_form, reading) merged.
