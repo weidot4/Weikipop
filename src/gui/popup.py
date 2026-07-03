@@ -1002,6 +1002,11 @@ class Popup(QWidget):
 
         return hr + html, sense_state
 
+    def _content_measure_width(self) -> int:
+        margins = self.content_layout.contentsMargins()
+        sb_w = self.content_scroll.verticalScrollBar().sizeHint().width()
+        return self._fixed_popup_size().width() - margins.left() - margins.right() - 2 - sb_w
+
     def _measure_html_height(self, html: str, width: int) -> int:
         """Measure the pixel height needed to render html at the given width.
         Uses a QTextDocument (same engine as QLabel) — synchronous, accurate,
@@ -1063,7 +1068,7 @@ class Popup(QWidget):
                 all_groups.append([word_key, [entry]])
 
         target_height = self._fixed_popup_size().height() * 1.2
-        content_width = self.max_content_width
+        content_width = self._content_measure_width()
 
         self._lazy_rendered_parts  = []
         self._rendered_groups      = []
