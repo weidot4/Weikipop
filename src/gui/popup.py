@@ -13,7 +13,8 @@ from PyQt6.QtCore import QTimer, QPoint, QSize, Qt, pyqtSignal, QEvent
 from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QFontInfo, QTextDocument
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QApplication, QScrollArea
 
-from src.config.config import config, IS_MACOS
+from src.config.config import config, IS_MACOS, IS_WINDOWS
+from src.dictionary.customdict import DEFAULT_FREQ
 from src.dictionary.lookup import DictionaryEntry, KanjiEntry
 from src.dictionary.anki_client import AnkiClient
 from src.gui.magpie_manager import magpie_manager
@@ -57,12 +58,27 @@ class Popup(QWidget):
         # Set whenever content changes; counts down to 0 so Qt layout settling
         # can never leave blank space at the top of the popup.
         self._scroll_reset_frames  = 0
+        self._topmost_frames       = 0
+        self._hide_ticks           = 0
+        self._FLIP_MARGIN          = 40
+        self._vn_is_below          = None
+        self._flip_left            = False
+        self._flip_up              = False
 
-        # Lazy rendering — only the first batch of entry groups is rendered on
-        # initial display; remaining groups load as the user scrolls down.
+        self._lazy_rendered_parts   = []
+        self._rendered_groups       = []
+        self._group_indices         = []
+        self._rendered_sense_state  = []
         self._lazy_pending_groups   = []    # groups not yet rendered
-        self._lazy_rendered_parts   = []    # accumulated HTML chunks
-        self._lazy_next_group_index = 0     # absolute group index for <hr> placement
+        self._lazy_next_group_index = 0
+        self._render_epoch          = 0
+        self._suppress_scroll_signal = False
+        self._render_ready          = False
+
+        self._SENSES_PER_ENTRY_INITIAL = 4
+        self._SENSES_PER_LOAD         = 5
+        self._GROUPS_PER_LOAD         = 3
+
         self._dismissed_by_click   = False
 
         self.shared_state = shared_state
@@ -92,6 +108,7 @@ class Popup(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.WindowDoesNotAcceptFocus |
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -280,6 +297,7 @@ class Popup(QWidget):
         with self._data_lock:
             self._latest_data   = data
             self._latest_context = context
+            self._render_ready  = False
 
     def get_latest_data(self) -> Tuple[Any, Optional[Dict[str, Any]]]:
         with self._data_lock:
@@ -303,10 +321,16 @@ class Popup(QWidget):
             full_html = self._calculate_content(latest_data)
             if full_html is not None:
                 if full_html != self._last_html:
-                    self.display_label.setText(full_html)
+                    self._render_epoch += 1
+                    self._suppress_scroll_signal = True
+                    try:
+                        self.display_label.setText(full_html)
+                        self.content_scroll.verticalScrollBar().setValue(0)
+                    finally:
+                        self._suppress_scroll_signal = False
                     self._last_html = full_html
-                    self.content_scroll.verticalScrollBar().setValue(0)
                     self._scroll_reset_frames = 8
+                    self.input_loop.get_and_reset_scroll_delta()
 
                 # Fixed consistent size — same width and height regardless of
                 # how many definitions exist, so the popup never jumps around.
@@ -320,6 +344,9 @@ class Popup(QWidget):
 
         self._last_latest_data    = latest_data
         self._last_latest_context = latest_context
+        with self._data_lock:
+            if self._latest_data is latest_data:
+                self._render_ready = True
 
         # Hotkey state — used for both presence check and shortcuts
         _kp = getattr(self.input_loop, 'hotkey_is_pressed', False)
@@ -391,19 +418,32 @@ class Popup(QWidget):
         Kept cheap: only reads hotkey state and moves the window."""
         _kp = getattr(self.input_loop, 'hotkey_is_pressed', False)
         _as = config.auto_scan_mode and config.auto_scan_mode_lookups_without_hotkey
-        has_data = self._latest_data is not None
+        with self._data_lock:
+            has_data = bool(self._latest_data)
+            render_ready = self._render_ready
         should_show = has_data and (_kp or _as)
 
         if not should_show:
             self._dismissed_by_click = False
 
         if should_show and not self._dismissed_by_click:
-            self.show_popup()
+            self._hide_ticks = 0
+            if render_ready:
+                self.show_popup()
             if self.is_visible:
+                self._topmost_frames += 1
+                if self._topmost_frames >= 60:
+                    self._topmost_frames = 0
+                    self._assert_topmost()
+
                 # Keep forcing scroll to top for a few frames after content changes
                 # so Qt's layout engine can never leave blank space at the top.
                 if self._scroll_reset_frames > 0:
-                    self.content_scroll.verticalScrollBar().setValue(0)
+                    self._suppress_scroll_signal = True
+                    try:
+                        self.content_scroll.verticalScrollBar().setValue(0)
+                    finally:
+                        self._suppress_scroll_signal = False
                     self._scroll_reset_frames -= 1
 
                 mouse_pos = QCursor.pos()
@@ -413,6 +453,11 @@ class Popup(QWidget):
                     self._last_mouse_pos = mp
                     self.move_to(mp[0], mp[1])
         else:
+            if (_kp or _as) and not has_data and self.is_visible and not self._dismissed_by_click:
+                self._hide_ticks += 1
+                if self._hide_ticks < 6:
+                    return
+            self._hide_ticks = 0
             self._scroll_reset_frames = 0
             self.hide_popup()
 
@@ -524,8 +569,8 @@ class Popup(QWidget):
             if (word and reading) else (word or reading)
         )
 
-        freq_val = getattr(entry, "freq", 999999)
-        freq_str = "" if freq_val >= 999999 else str(freq_val)
+        freq_val = getattr(entry, "freq", DEFAULT_FREQ)
+        freq_str = "" if freq_val >= DEFAULT_FREQ else str(freq_val)
 
         tags_str = " ".join(sorted(getattr(entry, "tags", set()) or []))
         conj_str = " > ".join(getattr(entry, "deconjugation_process", ()) or ())
@@ -829,11 +874,17 @@ class Popup(QWidget):
     #  Content rendering                                                    #
     # ------------------------------------------------------------------ #
 
-    def _render_senses(self, entry, max_ratio: float, inline_only: bool = False) -> tuple:
-        """Render the definitions block for one DictionaryEntry. Returns (senses_html, updated_max_ratio).
-        inline_only=True skips the leading <br> so the caller controls line breaks."""
+    def _render_senses(self, entry, max_ratio: float, inline_only: bool = False,
+                       max_senses: int = None) -> tuple:
+        sense_count = len(entry.senses)
+        effective_limit = max_senses if max_senses is not None else sense_count
+        if config.compact_mode:
+            effective_limit = sense_count
+
         parts_calc, parts_html = [], []
         for idx, sense in enumerate(entry.senses):
+            if idx >= effective_limit:
+                break
             glosses   = sense.get("glosses", [])
             pos_list  = sense.get("pos",     [])
             tags_list = sense.get("tags",    [])
@@ -873,98 +924,100 @@ class Popup(QWidget):
             sep_space = " " if config.compact_mode else "<br>"
             senses_html = (f'{sep_space}<span style="font-size:{config.font_size_definitions}px;">'
                            f'{full_def_html}</span>')
-        return senses_html, max_ratio
+        return senses_html, max_ratio, min(effective_limit, sense_count), sense_count
 
-    # How many word/reading groups to render on first display, and per scroll trigger.
-    _INITIAL_RENDER_GROUPS = 2
-    _GROUPS_PER_LOAD = 3
+    def _initial_sense_limits(self, group) -> dict:
+        if isinstance(group, KanjiEntry):
+            return {}
+        _, dict_entries = group
+        return {i: self._SENSES_PER_ENTRY_INITIAL for i in range(len(dict_entries))}
 
-    def _render_groups_to_html(self, groups: list, start_index: int = 0) -> tuple:
-        """Render a list of entry groups to an HTML string.
-        start_index is the absolute group index of groups[0], used only to decide
-        whether to prepend a <hr> separator before the first group.
-        Returns (html_string, max_ratio)."""
-        html_parts = []
-        max_ratio  = 0.0
+    def _render_one_group(self, group, group_index: int, sense_limits: dict = None):
+        hr = '<hr style="margin-top:0;margin-bottom:0;">' if group_index > 0 else ''
 
-        for i, group in enumerate(groups):
-            g_idx = start_index + i
-            if g_idx > 0:
-                html_parts.append('<hr style="margin-top:0;margin-bottom:0;">')
+        if isinstance(group, KanjiEntry):
+            return hr + self._render_kanji_entry(group), []
 
-            # ── Kanji entry ──────────────────────────────────────────────
-            if isinstance(group, KanjiEntry):
-                defn = ', '.join(group.meanings) if (config.show_examples or config.show_components) else '[字]'
-                calc = f"{group.character} {', '.join(group.readings)} {defn}"
-                max_ratio = max(max_ratio, len(calc) / self.header_chars_per_line, 0.7)
-                html_parts.append(self._render_kanji_entry(group))
-                continue
+        word_key, dict_entries = group
+        first_entry = dict_entries[0]
 
-            # ── Dictionary entry group ───────────────────────────────────
-            word_key, dict_entries = group
-            first_entry = dict_entries[0]
+        header_calc = first_entry.written_form or ""
+        if first_entry.reading:
+            header_calc += f" [{first_entry.reading}]"
+        max_ratio = max(0.0, len(header_calc) / self.header_chars_per_line)
 
-            header_calc = first_entry.written_form or ""
-            if first_entry.reading:
-                header_calc += f" [{first_entry.reading}]"
-            max_ratio = max(max_ratio, len(header_calc) / self.header_chars_per_line)
-
-            header_html = (
-                f'<span style="color:{config.color_highlight_word};'
-                f'font-size:{config.font_size_header}px;">{first_entry.written_form}</span>'
+        header_html = (
+            f'<span style="color:{config.color_highlight_word};'
+            f'font-size:{config.font_size_header}px;">{first_entry.written_form}</span>'
+        )
+        if first_entry.reading:
+            header_html += (
+                f' <span style="color:{config.color_highlight_reading};'
+                f'font-size:{config.font_size_header - 2}px;">[{first_entry.reading}]</span>'
             )
-            if first_entry.reading:
-                header_html += (
-                    f' <span style="color:{config.color_highlight_reading};'
-                    f'font-size:{config.font_size_header - 2}px;">[{first_entry.reading}]</span>'
-                )
-            if first_entry.deconjugation_process and config.show_deconjugation:
-                dc = " ← ".join(p for p in first_entry.deconjugation_process if p)
-                if dc:
-                    header_html += (
-                        f' <span style="color:{config.color_foreground};'
-                        f'font-size:{config.font_size_definitions - 2}px;opacity:0.8;">({dc})</span>'
-                    )
-            if config.show_frequency and first_entry.freq < 999_999:
+        if first_entry.deconjugation_process and config.show_deconjugation:
+            dc = " ← ".join(p for p in first_entry.deconjugation_process if p)
+            if dc:
                 header_html += (
                     f' <span style="color:{config.color_foreground};'
-                    f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{first_entry.freq}</span>'
+                    f'font-size:{config.font_size_definitions - 2}px;opacity:0.8;">({dc})</span>'
                 )
+        freq = getattr(first_entry, 'freq', DEFAULT_FREQ)
+        if config.show_frequency and freq < DEFAULT_FREQ:
+            header_html += (
+                f' <span style="color:{config.color_foreground};'
+                f'font-size:{config.font_size_definitions - 2}px;opacity:0.6;">#{freq}</span>'
+            )
 
-            multi_dict = len(dict_entries) > 1
-            body_parts = []
-            for entry in dict_entries:
-                if multi_dict:
-                    senses_html, max_ratio = self._render_senses(entry, max_ratio, inline_only=True)
-                    dict_name = getattr(entry, 'dictionary_name', '') or 'Dictionary'
-                    dict_label = (
-                        f'<span style="color:{config.color_foreground};'
-                        f'font-size:{config.font_size_definitions}px;opacity:0.85;">'
-                        f'<b>{dict_name}:</b> </span>'
-                    )
-                    body_parts.append(f'{dict_label}{senses_html}')
-                else:
-                    senses_html, max_ratio = self._render_senses(entry, max_ratio)
-                    if getattr(entry, 'dictionary_name', ''):
-                        header_html += (
-                            f' <span style="color:{config.color_foreground};'
-                            f'font-size:{config.font_size_definitions - 2}px;opacity:0.75;">'
-                            f'[{entry.dictionary_name}]</span>'
-                        )
-                    body_parts.append(senses_html)
+        multi_dict = len(dict_entries) > 1
+        body_parts = []
+        sense_state = []
 
+        for entry_idx, entry in enumerate(dict_entries):
+            limit = (sense_limits or {}).get(entry_idx)
             if multi_dict:
-                p_header = f'<p style="margin:0;padding:0;">{header_html}</p>'
-                p_dicts = ''.join(
-                    f'<p style="margin:0;padding:0;margin-top:3px;">{part}</p>'
-                    for part in body_parts
+                senses_html, max_ratio, rendered, total = self._render_senses(
+                    entry, max_ratio, inline_only=True, max_senses=limit
                 )
-                html_parts.append(p_header + p_dicts)
+                dict_name = getattr(entry, 'dictionary_name', '') or 'Dictionary'
+                dict_label = (
+                    f'<span style="color:{config.color_foreground};'
+                    f'font-size:{config.font_size_definitions}px;opacity:0.85;">'
+                    f'<b>{dict_name}:</b> </span>'
+                )
+                body_parts.append(f'{dict_label}{senses_html}')
             else:
-                combined_body = body_parts[0] if body_parts else ''
-                html_parts.append(f"{header_html}{combined_body}")
+                senses_html, max_ratio, rendered, total = self._render_senses(
+                    entry, max_ratio, max_senses=limit
+                )
+                if getattr(entry, 'dictionary_name', ''):
+                    header_html += (
+                        f' <span style="color:{config.color_foreground};'
+                        f'font-size:{config.font_size_definitions - 2}px;opacity:0.75;">'
+                        f'[{entry.dictionary_name}]</span>'
+                    )
+                body_parts.append(senses_html)
 
-        return "".join(html_parts), max_ratio
+            if rendered < total:
+                sense_state.append((entry_idx, rendered, total))
+
+        if multi_dict:
+            p_header = f'<p style="margin:0;padding:0;">{header_html}</p>'
+            p_dicts = ''.join(
+                f'<p style="margin:0;padding:0;margin-top:3px;">{part}</p>'
+                for part in body_parts
+            )
+            html = p_header + p_dicts
+        else:
+            combined_body = body_parts[0] if body_parts else ''
+            html = f"{header_html}{combined_body}"
+
+        return hr + html, sense_state
+
+    def _content_measure_width(self) -> int:
+        margins = self.content_layout.contentsMargins()
+        sb_w = self.content_scroll.verticalScrollBar().sizeHint().width()
+        return self._fixed_popup_size().width() - margins.left() - margins.right() - 2 - sb_w
 
     def _measure_html_height(self, html: str, width: int) -> int:
         """Measure the pixel height needed to render html at the given width.
@@ -1002,12 +1055,13 @@ class Popup(QWidget):
         return self._cached_popup_size
 
     def _calculate_content(self, entries) -> 'str | None':
-        """Build and return the initial HTML to display.  Only the first
-        _INITIAL_RENDER_GROUPS groups are rendered — the rest load as the
-        user scrolls via _on_scroll_lazy_load."""
         if not self.is_calibrated or not entries:
-            self._lazy_pending_groups = []
-            self._lazy_rendered_parts = []
+            self._lazy_pending_groups   = []
+            self._lazy_rendered_parts   = []
+            self._rendered_groups       = []
+            self._group_indices         = []
+            self._rendered_sense_state  = []
+            self._lazy_next_group_index = 0
             return None
 
         # Build display groups: entries sharing (written_form, reading) merged.
@@ -1022,50 +1076,148 @@ class Popup(QWidget):
             else:
                 all_groups.append([word_key, [entry]])
 
-        initial_groups              = all_groups[:self._INITIAL_RENDER_GROUPS]
-        self._lazy_pending_groups   = all_groups[self._INITIAL_RENDER_GROUPS:]
-        self._lazy_next_group_index = len(initial_groups)
+        target_height = self._fixed_popup_size().height() * 1.2
+        content_width = self._content_measure_width()
 
-        initial_html, _ = self._render_groups_to_html(initial_groups, start_index=0)
-        self._lazy_rendered_parts   = [initial_html]
-        return initial_html
+        self._lazy_rendered_parts  = []
+        self._rendered_groups      = []
+        self._group_indices        = []
+        self._rendered_sense_state = []
+
+        for i, group in enumerate(all_groups):
+            init_limits = self._initial_sense_limits(group)
+            html, sense_state = self._render_one_group(group, i, sense_limits=init_limits)
+            test_html = "".join(self._lazy_rendered_parts) + html
+            h = self._measure_html_height(test_html, content_width)
+
+            self._lazy_rendered_parts.append(html)
+            self._rendered_groups.append(group)
+            self._group_indices.append(i)
+            self._rendered_sense_state.append(sense_state)
+
+            if h > target_height and i >= 1:
+                self._lazy_pending_groups   = all_groups[i + 1:]
+                self._lazy_next_group_index = i + 1
+                break
+        else:
+            self._lazy_pending_groups   = []
+            self._lazy_next_group_index = len(all_groups)
+            self._expand_senses_to_fill(target_height, content_width)
+
+        return "".join(self._lazy_rendered_parts)
+
+    def _expand_senses_to_fill(self, target_height: float, content_width: int):
+        while True:
+            h = self._measure_html_height("".join(self._lazy_rendered_parts), content_width)
+            if h > target_height:
+                return
+            expanded = False
+            for g_idx, state_list in enumerate(self._rendered_sense_state):
+                for s_idx, (entry_idx, shown, total) in enumerate(state_list):
+                    if shown < total:
+                        state_list[s_idx] = (entry_idx, min(shown + self._SENSES_PER_LOAD, total), total)
+                        limits = {e_idx: count for (e_idx, count, _) in state_list}
+                        html, _ = self._render_one_group(
+                            self._rendered_groups[g_idx],
+                            self._group_indices[g_idx],
+                            sense_limits=limits,
+                        )
+                        self._lazy_rendered_parts[g_idx] = html
+                        expanded = True
+                        break
+                if expanded:
+                    break
+            if not expanded:
+                return
 
     # ------------------------------------------------------------------ #
     #  Lazy entry loading                                                   #
     # ------------------------------------------------------------------ #
 
     def _on_scroll_lazy_load(self, value: int):
-        """Triggered by the scrollbar — appends the next batch of entry groups
-        when the user has scrolled at least 70% of the way through current content."""
-        if not self._lazy_pending_groups:
+        if self._suppress_scroll_signal:
             return
+        has_pending_senses = any(
+            any(s[1] < s[2] for s in states)
+            for states in self._rendered_sense_state
+        )
+        if not self._lazy_pending_groups and not has_pending_senses:
+            return
+
         sb = self.content_scroll.verticalScrollBar()
-        if sb.maximum() > 0 and value >= sb.maximum() * 0.70:
+        if sb.maximum() <= 0 or value < sb.maximum() * 0.70:
+            return
+
+        for g_idx, state_list in enumerate(self._rendered_sense_state):
+            for s_idx, (entry_idx, shown, total) in enumerate(state_list):
+                if shown < total:
+                    new_shown = min(shown + self._SENSES_PER_LOAD, total)
+                    state_list[s_idx] = (entry_idx, new_shown, total)
+                    limits = {e_idx: count for (e_idx, count, _) in state_list}
+                    new_html, _ = self._render_one_group(
+                        self._rendered_groups[g_idx],
+                        self._group_indices[g_idx],
+                        sense_limits=limits,
+                    )
+                    width = self._content_measure_width()
+                    old_h = self._measure_html_height("".join(self._lazy_rendered_parts), width)
+                    group_end = self._measure_html_height("".join(self._lazy_rendered_parts[:g_idx + 1]), width)
+                    self._lazy_rendered_parts[g_idx] = new_html
+                    new_h = self._measure_html_height("".join(self._lazy_rendered_parts), width)
+                    delta = (new_h - old_h) if group_end <= sb.value() else 0
+                    self._commit_html(delta)
+                    return
+
+        if self._lazy_pending_groups:
             self._append_next_lazy_batch()
 
+    def _commit_html(self, scroll_delta: int = 0):
+        sb = self.content_scroll.verticalScrollBar()
+        saved_pos = sb.value() + scroll_delta
+        full_html = "".join(self._lazy_rendered_parts)
+        self._last_html = full_html
+        self._suppress_scroll_signal = True
+        try:
+            self.display_label.setText(full_html)
+        finally:
+            self._suppress_scroll_signal = False
+        epoch = self._render_epoch
+
+        def _restore(pos=saved_pos, ep=epoch):
+            if ep != self._render_epoch:
+                return
+            self._suppress_scroll_signal = True
+            try:
+                sb.setValue(pos)
+            finally:
+                self._suppress_scroll_signal = False
+
+        QTimer.singleShot(0, _restore)
+
     def _append_next_lazy_batch(self):
-        """Render the next _GROUPS_PER_LOAD pending groups and append them
-        without disturbing the user's current scroll position."""
         if not self._lazy_pending_groups:
             return
-        sb        = self.content_scroll.verticalScrollBar()
-        saved_pos = sb.value()
 
-        batch                     = self._lazy_pending_groups[:self._GROUPS_PER_LOAD]
+        batch = self._lazy_pending_groups[:self._GROUPS_PER_LOAD]
         self._lazy_pending_groups = self._lazy_pending_groups[self._GROUPS_PER_LOAD:]
 
-        batch_html, _ = self._render_groups_to_html(
-            batch, start_index=self._lazy_next_group_index
-        )
-        self._lazy_next_group_index += len(batch)
-        self._lazy_rendered_parts.append(batch_html)
+        parts, groups, indices, states = [], [], [], []
+        for i, group in enumerate(batch):
+            g_idx = self._lazy_next_group_index + i
+            init_limits = self._initial_sense_limits(group)
+            html, sense_state = self._render_one_group(group, g_idx, sense_limits=init_limits)
+            parts.append(html)
+            groups.append(group)
+            indices.append(g_idx)
+            states.append(sense_state)
 
-        full_html       = "".join(self._lazy_rendered_parts)
-        self._last_html = full_html   # keep in sync so the 60ms timer doesn't re-render
-        self.display_label.setText(full_html)
-        # Restore position after Qt settles the layout — content above the
-        # saved position is unchanged so this keeps the view perfectly stable.
-        QTimer.singleShot(0, lambda pos=saved_pos: sb.setValue(pos))
+        self._lazy_next_group_index += len(batch)
+        self._lazy_rendered_parts.extend(parts)
+        self._rendered_groups.extend(groups)
+        self._group_indices.extend(indices)
+        self._rendered_sense_state.extend(states)
+
+        self._commit_html()
 
     def _render_kanji_entry(self, entry: KanjiEntry) -> str:
         c_word = config.color_highlight_word
@@ -1121,10 +1273,24 @@ class Popup(QWidget):
             return
         self._store_active_window_on_mac()
         self.show()
-        if IS_MACOS:
-            self.raise_()
+        self.raise_()
+        self._assert_topmost()
         self.is_visible = True
         self.input_loop.suppress_scroll = True
+
+    def _assert_topmost(self):
+        if not IS_WINDOWS:
+            return
+        import ctypes
+        HWND_TOPMOST = -1
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+        try:
+            ctypes.windll.user32.SetWindowPos(
+                int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass
 
     def hide_popup(self):
         if not self.is_visible:
@@ -1133,6 +1299,9 @@ class Popup(QWidget):
         self.is_visible = False
         self.input_loop.suppress_scroll = False
         self._last_presence_word = None  # re-check on next show, even same word
+        self._vn_is_below = None
+        self._flip_left = False
+        self._flip_up = False
         QTimer.singleShot(50, self._release_lock_safely)
         self._restore_focus_on_mac()
 
@@ -1157,12 +1326,9 @@ class Popup(QWidget):
         if mode == "visual_novel_mode":
             sh = screen_geo.height()
             cy = y - screen_geo.top()
-            if cy > 2 * sh / 3:
-                is_below = False
-            elif cy < sh / 3:
-                is_below = True
-            else:
-                is_below = cy < sh / 2
+            if self._vn_is_below is None or abs(cy - sh / 2) > self._FLIP_MARGIN:
+                self._vn_is_below = cy < sh / 2
+            is_below = self._vn_is_below
             final_y = (y + offset) if is_below else (y - popup_size.height() - offset)
             final_y = max(screen_geo.top(), min(final_y, screen_geo.bottom() - popup_size.height()))
 
@@ -1179,26 +1345,40 @@ class Popup(QWidget):
                 final_x = pc * (1 - t) + pl * t
 
         elif mode == "flip_horizontally":
-            pref_x  = x + offset
-            final_x = pref_x if pref_x + popup_size.width() <= screen_geo.right() else x - popup_size.width() - offset
+            final_x = self._flip_x_with_hysteresis(x, offset, popup_size, screen_geo)
             final_y = y + offset
             final_y = max(screen_geo.top(), min(final_y, screen_geo.bottom() - popup_size.height()))
 
         elif mode == "flip_vertically":
             final_x = x + offset
             final_x = max(screen_geo.left(), min(final_x, screen_geo.right() - popup_size.width()))
-            pref_y  = y + offset
-            final_y = pref_y if pref_y + popup_size.height() <= screen_geo.bottom() else y - popup_size.height() - offset
+            final_y = self._flip_y_with_hysteresis(y, offset, popup_size, screen_geo)
 
         else:  # flip_both
-            pref_x  = x + offset
-            final_x = pref_x if pref_x + popup_size.width() <= screen_geo.right() else x - popup_size.width() - offset
-            pref_y  = y + offset
-            final_y = pref_y if pref_y + popup_size.height() <= screen_geo.bottom() else y - popup_size.height() - offset
+            final_x = self._flip_x_with_hysteresis(x, offset, popup_size, screen_geo)
+            final_y = self._flip_y_with_hysteresis(y, offset, popup_size, screen_geo)
 
         final_x = max(screen_geo.left(), min(final_x, screen_geo.right()  - popup_size.width()))
         final_y = max(screen_geo.top(),  min(final_y, screen_geo.bottom() - popup_size.height()))
         self.move(int(final_x), int(final_y))
+
+    def _flip_x_with_hysteresis(self, x, offset, popup_size, screen_geo):
+        fits   = x + offset + popup_size.width() <= screen_geo.right()
+        refits = x + offset + popup_size.width() <= screen_geo.right() - self._FLIP_MARGIN
+        if not fits:
+            self._flip_left = True
+        elif refits or not self._flip_left:
+            self._flip_left = False
+        return (x - popup_size.width() - offset) if self._flip_left else (x + offset)
+
+    def _flip_y_with_hysteresis(self, y, offset, popup_size, screen_geo):
+        fits   = y + offset + popup_size.height() <= screen_geo.bottom()
+        refits = y + offset + popup_size.height() <= screen_geo.bottom() - self._FLIP_MARGIN
+        if not fits:
+            self._flip_up = True
+        elif refits or not self._flip_up:
+            self._flip_up = False
+        return (y - popup_size.height() - offset) if self._flip_up else (y + offset)
 
     def reapply_settings(self):
         logger.debug("Popup: reapplying settings")
@@ -1206,6 +1386,16 @@ class Popup(QWidget):
         self.is_calibrated = False
         self._last_size = None
         self._cached_popup_size = None   # recompute size — dict count or compact mode may have changed
+        self._last_latest_data = None
+        self._last_latest_context = None
+        self._last_html = None
+        self._render_epoch += 1
+        self._lazy_rendered_parts = []
+        self._rendered_groups = []
+        self._group_indices = []
+        self._rendered_sense_state = []
+        self._lazy_pending_groups = []
+        self._lazy_next_group_index = 0
 
     # ------------------------------------------------------------------ #
     #  macOS focus management                                               #

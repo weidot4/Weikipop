@@ -73,6 +73,7 @@ class Lookup(threading.Thread):
         self.shared_state = shared_state
         self.popup_window = popup_window
         self.last_hit_result = None
+        self._last_ocr_epoch = None
         self._dict_lock = threading.RLock()
 
         self.user_dictionary_dir = Path('user_dictionaries')
@@ -81,6 +82,7 @@ class Lookup(threading.Thread):
         # entry_id -> source metadata
         self.entry_sources: Dict[int, Dict[str, Any]] = {}
         self.primary_kanji_entries: Dict[str, Dict[str, Any]] = {}
+        self.freq_index: Dict[Tuple[Optional[str], str], int] = {}
 
         # Cache loaded Dictionary objects by (path, mtime).  This avoids
         # re-reading and re-unpickling unchanged files (e.g. the 65 MB main
@@ -248,6 +250,16 @@ class Lookup(threading.Thread):
         return report
 
     @staticmethod
+    def _harvest_freq(freq_index: Dict[Tuple[Optional[str], str], int], map_entry: tuple):
+        freq = map_entry[FREQUENCY_INDEX]
+        if not isinstance(freq, int) or freq >= DEFAULT_FREQ:
+            return
+        key = (map_entry[WRITTEN_FORM_INDEX], map_entry[READING_INDEX] or '')
+        cur = freq_index.get(key)
+        if cur is None or freq < cur:
+            freq_index[key] = freq
+
+    @staticmethod
     def _unique_dictionary_name(base_name: str, existing_names: Dict[str, Dict[str, Any]]) -> str:
         sanitized = re.sub(r'[^\w\-\s\u3040-\u30ff\u3400-\u9fff]', '', (base_name or '').strip())
         sanitized = sanitized or 'Dictionary'
@@ -266,6 +278,7 @@ class Lookup(threading.Thread):
             combined_lookup_map: Dict[str, list] = {}
             combined_kanji_entries: Dict[str, dict] = {}
             combined_deconj_rules: list[dict] = []
+            freq_index: Dict[Tuple[Optional[str], str], int] = {}
             self.entry_sources = {}
 
             next_entry_id = 1
@@ -331,6 +344,7 @@ class Lookup(threading.Thread):
                             map_entry[FREQUENCY_INDEX],
                             new_eid,
                         ))
+                        self._harvest_freq(freq_index, map_entry)
 
                 if not combined_kanji_entries and dictionary.kanji_entries:
                     combined_kanji_entries = dictionary.kanji_entries
@@ -341,6 +355,31 @@ class Lookup(threading.Thread):
                 if progress_cb:
                     progress_cb(source_index + 1, n_sources, "")
 
+            harvested_paths = {s.get('path', '') for s in enabled_sources}
+            for source in sources:
+                if source.get('enabled', True) or not source.get('builtin'):
+                    continue
+                path = source.get('path', '')
+                if not path or path in harvested_paths or not os.path.exists(path):
+                    continue
+                harvested_paths.add(path)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    mtime = 0.0
+                cached = self._dict_file_cache.get(path)
+                if cached and cached[0] == mtime:
+                    dictionary = cached[1]
+                else:
+                    dictionary = Dictionary()
+                    if not dictionary.load_dictionary(path):
+                        continue
+                for map_entries in dictionary.lookup_map.values():
+                    for map_entry in map_entries:
+                        self._harvest_freq(freq_index, map_entry)
+                dictionary = None
+
+            self.freq_index = freq_index
             self.dictionary.entries = combined_entries
             self.dictionary.lookup_map = combined_lookup_map
             self.dictionary.kanji_entries = combined_kanji_entries
@@ -370,14 +409,14 @@ class Lookup(threading.Thread):
 
                 current_lookup_string = self._extract_lookup_string(hit_result)
                 last_lookup_string = self._extract_lookup_string(self.last_hit_result)
-
+                current_epoch = hit_result.get("ocr_epoch") if isinstance(hit_result, dict) else None
 
                 self.last_hit_result = hit_result
 
-                # skip lookup if lookup string didnt change
-                if current_lookup_string == last_lookup_string:
+                if (current_lookup_string == last_lookup_string
+                        and current_epoch == self._last_ocr_epoch):
                     continue
-                
+                self._last_ocr_epoch = current_epoch
 
                 lookup_result = self.lookup(current_lookup_string) if current_lookup_string else None
                 # Pass context to popup if supported
@@ -622,6 +661,13 @@ class Lookup(threading.Thread):
             written = map_entry[WRITTEN_FORM_INDEX]
             reading = map_entry[READING_INDEX] or ''
             freq = map_entry[FREQUENCY_INDEX]
+            if not isinstance(freq, int):
+                freq = DEFAULT_FREQ
+            idx_freq = self.freq_index.get((written, reading))
+            if idx_freq is None and reading:
+                idx_freq = self.freq_index.get((written, ''))
+            if idx_freq is not None and idx_freq < freq:
+                freq = idx_freq
             entry_id = map_entry[ENTRY_ID_INDEX]
             source_meta = self.entry_sources.get(entry_id, {})
             dictionary_name = source_meta.get('dictionary_name', 'Dictionary')
@@ -666,6 +712,11 @@ class Lookup(threading.Thread):
         for entry in merged.values():
             word_key = (entry['written_form'], entry['reading'])
             word_groups[word_key].append(entry)
+
+        for entries in word_groups.values():
+            best = min(e['freq'] for e in entries)
+            for e in entries:
+                e['freq'] = best
 
         processed_groups = []
         for entries in word_groups.values():

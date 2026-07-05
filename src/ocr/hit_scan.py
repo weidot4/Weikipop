@@ -21,7 +21,8 @@ class HitScanner(threading.Thread):
         self.shared_state = shared_state
         self.input_loop = input_loop
         self.screen_manager = screen_manager
-        self.last_ocr_result = None
+        self._last_ocr_texts = None
+        self._ocr_epoch = 0
 
     def run(self):
         logger.debug("HitScanner thread started.")
@@ -30,12 +31,14 @@ class HitScanner(threading.Thread):
                 ocr_result = self.shared_state.hit_scan_queue.get()
                 if not self.shared_state.running: break
                 logger.debug("HitScanner: Triggered")
-                # If OCR produced new paragraphs, clear last lookup so
-                # the same word in new dialogue is always re-looked up
-                if ocr_result is not None and ocr_result != self.last_ocr_result:
-                    self.shared_state.lookup_queue.put(None)  # clears last_hit_result in lookup
-                self.last_ocr_result = ocr_result
+                if ocr_result is not None:
+                    texts = tuple(p.full_text for p in ocr_result)
+                    if texts != self._last_ocr_texts:
+                        self._last_ocr_texts = texts
+                        self._ocr_epoch += 1
                 hit_scan_result = self.hit_scan(ocr_result)
+                if hit_scan_result is not None:
+                    hit_scan_result["ocr_epoch"] = self._ocr_epoch
                 self.shared_state.lookup_queue.put(hit_scan_result)
             except Exception:
                 logger.exception("An unexpected error occurred in the hit scan loop. Continuing...")
