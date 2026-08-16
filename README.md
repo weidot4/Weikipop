@@ -1,4 +1,4 @@
-# THIS IS OBSOLETE!! Entire rust writeup and successor to Weikipop by a great friend has been finally achieved! It's super good!! It's still being worked on though so please be patient with any current problems https://github.com/stellarie/chibipop
+# THIS IS OBSOLETE!! Entire rust writeup and successor to Weikipop by a great friend has been finally achieved! It's still being worked on though with the ocr currently being especially finicky so please be patient with any current problems https://github.com/stellarie/chibipop
 
 weikipop is a desktop Japanese OCR lookup tool built on top of the original Meikipop project line.
 
